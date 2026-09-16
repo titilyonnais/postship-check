@@ -1,0 +1,54 @@
+# PostShip check — vérifier une URL depuis un workflow GitHub.
+#
+# Composite plutôt que Docker : une action Docker coûte une construction
+# d'image à chaque exécution pour un script qui tient en une page, et
+# `node` est déjà là sur tous les runners GitHub.
+#
+# Le jeton est une input d'action (GitHub la masque si c'est un secret
+# passé `token: ${{ secrets.POSTSHIP_TOKEN }}`) et redevient une variable
+# d'environnement dans le step. Jamais un argument de ligne de commande :
+# un argument se retrouve dans la liste des processus du runner.
+#
+# Ce dossier n'est pas un workflow : rien ne tourne sur ce dépôt. Il est
+# fait pour être copié tel quel dans le dépôt public dédié
+# (titilyonnais/postship-check, tag v1) le jour de la publication — voir
+# docs/CLI.md. `pnpm cli:bundle` pose à côté un postship.mjs autonome.
+name: PostShip check
+description: Vérifie une URL comme PostShip le fait après un déploiement (HTTP, ressources, indexabilité, carte sociale, sitemap, certificat). Même Ship Score.
+author: PostShip
+
+inputs:
+  url:
+    description: L'adresse à vérifier (https, publique).
+    required: true
+  token:
+    description: Jeton d'API PostShip (Compte → API). À passer via un secret.
+    required: true
+  min-score:
+    description: Échoue si le Ship Score est sous ce seuil. 0 = pas de seuil.
+    required: false
+    default: "0"
+
+runs:
+  using: composite
+  steps:
+    - name: postship check
+      shell: bash
+      env:
+        POSTSHIP_TOKEN: ${{ inputs.token }}
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_MIN_SCORE: ${{ inputs.min-score }}
+      run: |
+        set -euo pipefail
+        # Deux emplacements, pour que ce dossier puisse être publié seul :
+        # le binaire autonome à côté de l'action s'il a été posé là
+        # (pnpm cli:bundle), sinon celui du monorepo, trois niveaux au-dessus.
+        cli="${{ github.action_path }}/postship.mjs"
+        if [ ! -f "$cli" ]; then
+          cli="${{ github.action_path }}/../../../src/cli/postship.mjs"
+        fi
+        node "$cli" check --url "$INPUT_URL" --min-score "$INPUT_MIN_SCORE"
+
+branding:
+  icon: check-circle
+  color: green
