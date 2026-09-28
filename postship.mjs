@@ -2,10 +2,11 @@
 // PostShip CLI — fichier autonome assemblé par scripts/cli-bundle.mjs.
 // Ne pas éditer : la source est src/cli/. Node 18+, aucune dépendance.
 import { pathToFileURL } from "node:url";
-import { readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, chmodSync, readdirSync, realpathSync, rmdirSync, rmSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join, dirname } from "node:path";
-import { spawn, execFileSync } from "node:child_process";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { spawn, execFileSync, spawnSync } from "node:child_process";
 
 // ---- aide.mjs
 // L'aide de chaque commande, dans les deux langues — la seule source :
@@ -14,7 +15,7 @@ import { spawn, execFileSync } from "node:child_process";
 // Chaque commande : ce qu'elle fait, ses options expliquées une à une,
 // deux exemples au moins, ce que le code de sortie veut dire, et ce
 // qu'on vérifie quand ça ne marche pas.
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 
 /** @typedef {{ fr: string, en: string }} T */
 
@@ -224,13 +225,13 @@ const COMMANDES = {
     resume: { fr: "Le compte, les projets, les incidents ouverts et le dernier ship en un écran.", en: "Account, projects, open incidents and last ship on one screen." },
     quota: false,
     usage: "postship status [--project <id>] [--json]",
-    description: { fr: "Le tableau de bord — c'est aussi ce qu'affiche postship tapé seul dans un terminal. Qui parle (plan, quota, clé), chaque projet avec son état et le nombre d'incidents ouverts, et pour le projet courant — celui de ./.postship.json ou de --project — les incidents ouverts et le dernier déploiement de production.", en: "The dashboard — also what postship typed alone shows in a terminal. Who is speaking (plan, quota, key), each project with its state and number of open incidents, and for the current project — the one in ./.postship.json or --project — open incidents and the last production deploy." },
+    description: { fr: "Le tableau de bord, d'un coup, puis la main rend au shell — tapé seul, postship ouvre la console interactive, qui suit la même chose en direct. Qui parle (plan, quota, clé), chaque projet avec son état et le nombre d'incidents ouverts, et pour le projet courant — celui de ./.postship.json ou de --project — les incidents ouverts et le dernier déploiement de production.", en: "The dashboard, at once, then back to the shell — typed alone, postship opens the interactive console, which follows the same things live. Who is speaking (plan, quota, key), each project with its state and number of open incidents, and for the current project — the one in ./.postship.json or --project — open incidents and the last production deploy." },
     options: [
       { nom: "--project, -p", valeur: "<id>", texte: { fr: "Le projet à détailler.", en: "The project to detail." } },
       { nom: "--json", texte: { fr: "Tout, brut.", en: "Everything, raw." } },
     ],
     exemples: [
-      { cmd: "postship", texte: { fr: "Le même écran, en un mot.", en: "The same screen, in one word." } },
+      { cmd: "postship status -p 3f1c…", texte: { fr: "Un projet en détail : incidents ouverts et dernier ship.", en: "One project in detail: open incidents and last ship." } },
       { cmd: "postship status --json | jq '.projects[] | select(.openIncidents > 0) | .name'", texte: { fr: "Les projets qui ont un incident ouvert.", en: "The projects with an open incident." } },
     ],
     sortie: { fr: "0 · 1 un incident ouvert ou un ship en échec sur le projet courant · 2 jeton, réseau.", en: "0 · 1 an open incident or a failing ship on the current project · 2 token, network." },
@@ -287,6 +288,38 @@ const COMMANDES = {
     sortie: { fr: "0 fichier écrit · 2 pas de terminal et pas de --project, identifiant invalide, jeton, réseau.", en: "0 file written · 2 no terminal and no --project, invalid id, token, network." },
     depannage: [],
   },
+  update: {
+    resume: { fr: "Met la CLI à jour, avec le gestionnaire qui l'a installée.", en: "Update the CLI, with the package manager that installed it." },
+    quota: false,
+    usage: "postship update [--check]",
+    description: {
+      fr: "Lit la dernière version publiée sur npm et, si elle est plus récente, la réinstalle avec le gestionnaire qui a installé la CLI — npm i -g postship@latest, ou son équivalent pnpm, yarn ou bun. La connexion est gardée : la clé reste dans ~/.config/postship. Une CLI lancée par npx, depuis la source ou dans l'action GitHub n'est pas touchée : la commande dit quoi faire. Dans la console, la mise à jour faite, on relance postship.",
+      en: "Reads the latest version published on npm and, when it is newer, reinstalls it with the package manager that installed the CLI — npm i -g postship@latest, or its pnpm, yarn or bun equivalent. You stay signed in: the key stays in ~/.config/postship. A CLI run through npx, from source or in the GitHub action is left alone: the command says what to do. In the console, once updated, run postship again.",
+    },
+    options: [{ nom: "--check", texte: { fr: "Dit seulement si une version plus récente existe, sans rien installer.", en: "Only says whether a newer version exists, without installing anything." } }],
+    exemples: [
+      { cmd: "postship update", texte: { fr: "La dernière version, en une commande.", en: "The latest version, in one command." } },
+      { cmd: "postship update --check", texte: { fr: "Savoir s'il y a du nouveau, sans rien changer.", en: "Find out whether there is something new, without changing anything." } },
+    ],
+    sortie: { fr: "0 à jour, ou mise à jour faite · 2 registre npm injoignable, CLI hors installation globale, ou échec du gestionnaire (droits).", en: "0 up to date, or updated · 2 npm registry unreachable, CLI not globally installed, or the package manager failed (permissions)." },
+    depannage: [{ q: { fr: "« La mise à jour a échoué » avec EACCES", en: "“The update failed” with EACCES" }, r: { fr: "Sur macOS ou Linux, le dossier global de npm appartient souvent à root : sudo npm i -g postship@latest, ou un gestionnaire de versions de Node (nvm, fnm) qui installe dans votre dossier.", en: "On macOS or Linux, npm's global folder often belongs to root: sudo npm i -g postship@latest, or a Node version manager (nvm, fnm) that installs in your home folder." } }],
+  },
+  uninstall: {
+    resume: { fr: "Révoque la clé, efface la configuration et désinstalle la CLI.", en: "Revoke the key, delete the configuration and uninstall the CLI." },
+    quota: false,
+    usage: "postship uninstall [--yes]",
+    description: {
+      fr: "Trois gestes, dans l'ordre : la clé de ce terminal est révoquée chez PostShip (comme postship logout), ~/.config/postship est effacé (clé, historique de la console, cache de version), puis le paquet est retiré avec le gestionnaire qui l'a installé. Une confirmation est demandée dans un terminal ; --yes pour un script. Les fichiers ./.postship.json de vos dépôts et une clé posée dans POSTSHIP_TOKEN ne sont pas touchés.",
+      en: "Three steps, in order: this terminal's key is revoked on PostShip (like postship logout), ~/.config/postship is deleted (key, console history, version cache), then the package is removed with the package manager that installed it. A confirmation is asked in a terminal; --yes for a script. The ./.postship.json files in your repositories and a key set in POSTSHIP_TOKEN are left alone.",
+    },
+    options: [{ nom: "--yes", texte: { fr: "Sans confirmation (obligatoire hors d'un terminal).", en: "Without confirmation (required outside a terminal)." } }],
+    exemples: [
+      { cmd: "postship uninstall", texte: { fr: "Tout retirer, proprement.", en: "Remove everything, cleanly." } },
+      { cmd: "postship uninstall --yes", texte: { fr: "Dans un script de nettoyage de poste.", en: "In a machine clean-up script." } },
+    ],
+    sortie: { fr: "0 désinstallé (ou renoncé à la confirmation) · 2 hors terminal sans --yes, ou échec du gestionnaire.", en: "0 uninstalled (or declined at the confirmation) · 2 outside a terminal without --yes, or the package manager failed." },
+    depannage: [{ q: { fr: "« Le fichier de commandes est introuvable » dans cmd.exe", en: "“The batch file cannot be found” in cmd.exe" }, r: { fr: "Sans conséquence : cmd.exe relit le raccourci postship.cmd qui vient d'être supprimé. PowerShell et Windows Terminal ne l'affichent pas.", en: "Harmless: cmd.exe reads again the postship.cmd shim that was just removed. PowerShell and Windows Terminal do not show it." } }],
+  },
   completion: {
     resume: { fr: "L'autocomplétion des commandes et options pour votre shell.", en: "Command and option completion for your shell." },
     quota: false,
@@ -314,7 +347,18 @@ const COMMANDES = {
   },
 };
 
-const ORDRE = ["login", "logout", "status", "check", "projects", "incidents", "ship", "ships", "urls", "wait", "gate", "watch", "open", "whoami", "doctor", "init", "completion", "docs"];
+const ORDRE = ["login", "logout", "status", "check", "projects", "incidents", "ship", "ships", "urls", "wait", "gate", "watch", "open", "whoami", "doctor", "init", "update", "uninstall", "completion", "docs"];
+
+/**
+ * Les commandes rangées par usage, pour l'aide générale et le menu « / »
+ * de la console (28 sept. 2026). Chaque commande de ORDRE y figure une
+ * fois — le test le vérifie.
+ */
+const GROUPES = [
+  { fr: "Au quotidien", en: "Day to day", commandes: ["status", "watch", "wait", "check", "incidents", "open"] },
+  { fr: "Projets et déploiements", en: "Projects and deploys", commandes: ["projects", "urls", "ship", "ships", "gate"] },
+  { fr: "Compte et outils", en: "Account and tools", commandes: ["login", "logout", "whoami", "init", "update", "uninstall", "doctor", "completion", "docs"] },
+];
 
 const PAGES_OPEN = ["apercu", "incidents", "deploys", "urls", "performance", "reglages"];
 
@@ -430,9 +474,19 @@ async function appelAuthentifie(methode, chemin, options = {}) {
   return r.payload;
 }
 
-/** Français si LANG commence par fr, sinon anglais. */
+/**
+ * Français si LANG commence par fr, sinon anglais. Sans LANG — le cas
+ * de Windows —, la langue du système (28 sept. 2026) : un Windows en
+ * français avait une CLI en anglais.
+ */
 function langue() {
-  const l = process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || "";
+  let systeme = "";
+  try {
+    systeme = Intl.DateTimeFormat().resolvedOptions().locale ?? "";
+  } catch {
+    // pas d'Intl : l'anglais
+  }
+  const l = process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || systeme;
   return l.toLowerCase().startsWith("fr") ? "fr" : "en";
 }
 
@@ -537,6 +591,33 @@ function tableau(lignes) {
 function visible(s) {
   // Les échappements ANSI ne comptent pas dans la largeur.
   return String(s).replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+/** Coupe à n colonnes visibles, couleurs comprises, avec « … » quand il en manque. */
+function tronquer(s, n) {
+  const texte = String(s);
+  if (visible(texte).length <= n) return texte;
+  if (n <= 1) return "…".slice(0, Math.max(0, n));
+  let sortie = "";
+  let vus = 0;
+  for (const morceau of texte.split(/(\x1b\[[0-9;]*m)/)) {
+    if (/^\x1b\[[0-9;]*m$/.test(morceau)) {
+      sortie += morceau;
+      continue;
+    }
+    for (const c of morceau) {
+      if (vus >= n - 1) break;
+      sortie += c;
+      vus++;
+    }
+    if (vus >= n - 1) break;
+  }
+  return `${sortie}…${texte.includes("\x1b[") ? "\x1b[0m" : ""}`;
+}
+
+/** Complète d'espaces jusqu'à n colonnes visibles. */
+function completer(s, n) {
+  return `${s}${" ".repeat(Math.max(0, n - visible(s).length))}`;
 }
 
 const MARQUE = { pass: "pass", fail: "fail", error: "error", skip: "skip", muted: "off" };
@@ -745,6 +826,960 @@ function entier(valeur) {
   return Number.isFinite(n) ? n : NaN;
 }
 
+// ---- notifier.mjs
+// Une notification du bureau, sans dépendance (28 sept. 2026) : pour
+// `postship wait --notify` (le ship est conclu, revenez) et
+// `postship watch --notify` (un incident s'ouvre ou se ferme).
+//
+// macOS : osascript ; Linux : notify-send ; Windows : un toast par
+// PowerShell. Le titre et le texte ne sont jamais collés dans une ligne
+// de commande : ils passent en arguments (osascript, notify-send) ou en
+// variables d'environnement (PowerShell) — une URL ou un libellé venus du
+// serveur ne peuvent donc rien exécuter. Rend false quand rien n'a pu
+// être lancé ; la sonnerie du terminal reste, elle, toujours là.
+
+
+const TOAST_WINDOWS = [
+  "$ErrorActionPreference='SilentlyContinue'",
+  "[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]",
+  "$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)",
+  "$t=$x.GetElementsByTagName('text')",
+  "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:POSTSHIP_NOTIF_TITRE))",
+  "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:POSTSHIP_NOTIF_TEXTE))",
+  "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))",
+].join("; ");
+
+function notifierBureau(titre, texte) {
+  if (process.env.POSTSHIP_NO_BROWSER || process.env.CI === "true") return false;
+  const t1 = masquer(titre).slice(0, 120);
+  const t2 = masquer(texte).slice(0, 240);
+  try {
+    const p =
+      process.platform === "darwin"
+        ? spawn("osascript", ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", t1, t2], { stdio: "ignore", detached: true })
+        : process.platform === "win32"
+          ? spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", TOAST_WINDOWS], { stdio: "ignore", detached: true, windowsHide: true, env: { ...process.env, POSTSHIP_NOTIF_TITRE: t1, POSTSHIP_NOTIF_TEXTE: t2 } })
+          : spawn("notify-send", ["--app-name=PostShip", t1, t2], { stdio: "ignore", detached: true });
+    p.on("error", () => {});
+    p.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ---- version.mjs
+// L'avis de nouvelle version : au plus une fois par jour, une ligne
+// discrète sur la sortie d'erreur — jamais de mise à jour automatique
+// (c'est `postship update` qui installe, quand on le demande).
+// Lu sur le registre npm, mémorisé à côté de la config. Muet en CI, sans
+// terminal, ou en --json : rien ne doit polluer une sortie qu'un script lit.
+
+
+
+
+
+const UN_JOUR = 86_400_000;
+
+function cheminCacheVersion() {
+  return join(dirname(cheminConfig()), "version-check.json");
+}
+
+/** a < b, sur « x.y.z » ; false si l'une n'est pas une version. */
+function plusRecente(a, b) {
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  if (pa.some(Number.isNaN) || pb.some(Number.isNaN) || pa.length < 3 || pb.length < 3) return false;
+  for (let i = 0; i < 3; i++) {
+    if (pb[i] > pa[i]) return true;
+    if (pb[i] < pa[i]) return false;
+  }
+  return false;
+}
+
+/**
+ * La dernière version publiée sur npm : celle du cache si elle a moins
+ * d'un jour, sinon celle du registre. `forcer` interroge toujours le
+ * registre (postship update) et rend null s'il ne répond pas.
+ */
+async function versionPubliee({ forcer = false, delaiMs = 1500 } = {}) {
+  let cache = {};
+  try {
+    cache = JSON.parse(readFileSync(cheminCacheVersion(), "utf8"));
+  } catch {
+    // premier passage
+  }
+  if (!forcer && cache.verifieLe && Date.now() - new Date(cache.verifieLe).getTime() <= UN_JOUR) return cache.derniere ?? null;
+  let derniere = null;
+  try {
+    const controleur = new AbortController();
+    const minuterie = setTimeout(() => controleur.abort(), delaiMs);
+    const r = await fetch("https://registry.npmjs.org/postship/latest", { signal: controleur.signal, headers: { Accept: "application/json" } });
+    clearTimeout(minuterie);
+    if (r.ok) derniere = (await r.json()).version ?? null;
+  } catch {
+    // le registre ne répond pas : on retentera plus tard
+  }
+  try {
+    mkdirSync(dirname(cheminCacheVersion()), { recursive: true });
+    writeFileSync(cheminCacheVersion(), JSON.stringify({ verifieLe: new Date().toISOString(), derniere: derniere ?? cache.derniere ?? null }));
+  } catch {
+    // pas grave
+  }
+  return forcer ? derniere : (derniere ?? cache.derniere ?? null);
+}
+
+async function avisDeVersion({ json = false } = {}) {
+  if (json || process.env.CI === "true" || !process.stderr.isTTY || process.env.POSTSHIP_NO_UPDATE_NOTICE || VERSION.startsWith("__")) return;
+  const derniere = await versionPubliee();
+  if (derniere && plusRecente(VERSION, derniere)) {
+    console.error(peindre("dim", t("postship {0} est disponible (vous avez {1}) : postship update", "postship {0} is available (you have {1}): postship update", derniere, VERSION)));
+  }
+}
+
+// ---- console.mjs
+// La console : `postship` tapé seul dans un terminal (28 sept. 2026).
+//
+// Une invite encadrée en bas de l'écran, comme `claude` : on y tape les
+// commandes de la CLI (avec ou sans « / », avec ou sans « postship »),
+// « / » ouvre la liste des commandes avec leur description, Tab complète,
+// ↑ ↓ remontent l'historique. Sous l'invite, une ligne d'état vit toute
+// seule : plan, quota, projet de la session, incidents ouverts. Toutes les
+// 30 s, la console relit vos projets ; un incident qui s'ouvre ou se ferme
+// s'imprime au-dessus de l'invite, avec une sonnerie (et une notification
+// du bureau après /notifier). Ctrl+C ou Échap annule la commande en cours
+// sans quitter ; Ctrl+C deux fois, ou Ctrl+D, quitte.
+//
+// Sans dépendance, comme le reste : le mode brut de stdin, les séquences
+// ANSI, et une zone redessinée sous le curseur. Ce qui a été imprimé
+// au-dessus reste dans l'historique du terminal.
+
+
+
+
+
+
+
+
+
+/** Les commandes propres à la console, en plus de celles de la CLI. */
+const SESSION_CONSOLE = {
+  projet: { fr: "Choisit le projet de la session ; « tous » pour revenir à tous.", en: "Choose the session's project; “all” to go back to every project." },
+  notifier: { fr: "Notifications du bureau quand un incident s'ouvre ou se ferme (on/off).", en: "Desktop notifications when an incident opens or closes (on/off)." },
+  aide: { fr: "Les commandes et les raccourcis clavier.", en: "Commands and keyboard shortcuts." },
+  effacer: { fr: "Efface l'écran.", en: "Clear the screen." },
+  quitter: { fr: "Quitte la console (Ctrl+D).", en: "Quit the console (Ctrl+D)." },
+};
+const ALIAS_CONSOLE = { project: "projet", projects: "projects", notify: "notifier", help: "aide", "?": "aide", clear: "effacer", exit: "quitter", quit: "quitter", q: "quitter" };
+/** Ce qui n'a pas de sens dans la console : watch (la console suit déjà), completion (un script pour le shell). */
+const HORS_CONSOLE = new Set(["watch", "completion"]);
+/** Les commandes qui prennent le projet de la session quand on n'en donne pas. */
+const AVEC_PROJET = new Set(["status", "check", "incidents", "ship", "ships", "urls", "wait", "gate", "open"]);
+/** Les commandes qui lisent elles-mêmes le clavier : la console se tait pendant ce temps. */
+const AVEC_CLAVIER = new Set(["init", "uninstall"]);
+const PROJETS_SUIVIS_CONSOLE = 20;
+const HISTORIQUE_MAX = 500;
+
+/** « check "mon site.fr" --min-score 80 » → ["check", "mon site.fr", "--min-score", "80"]. */
+function decouperLigne(ligne) {
+  const sortie = [];
+  let courant = "";
+  let guillemet = null;
+  let entame = false;
+  for (const c of String(ligne)) {
+    if (guillemet) {
+      if (c === guillemet) guillemet = null;
+      else courant += c;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      guillemet = c;
+      entame = true;
+      continue;
+    }
+    if (/\s/.test(c)) {
+      if (courant || entame) sortie.push(courant);
+      courant = "";
+      entame = false;
+      continue;
+    }
+    courant += c;
+  }
+  if (courant || entame) sortie.push(courant);
+  return sortie;
+}
+
+const SEQUENCES_TOUCHES = { "[A": "up", "[B": "down", "[C": "right", "[D": "left", OA: "up", OB: "down", OC: "right", OD: "left", "[H": "home", "[F": "end", OH: "home", OF: "end", "[1~": "home", "[4~": "end", "[7~": "home", "[8~": "end", "[3~": "delete" };
+
+/**
+ * Les touches d'un morceau lu en mode brut. Un Échap seul arrive seul :
+ * les terminaux envoient une séquence (flèche, Suppr…) d'un bloc. Le
+ * décodeur de Node, lui, garde un Échap isolé en attente de la touche
+ * suivante — d'où celui-ci.
+ */
+function lireTouches(donnees) {
+  const s = String(donnees);
+  const touches = [];
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === "\x1b") {
+      const m = s.slice(i + 1).match(/^(\[[0-9;]*[A-Za-z~]|O[A-Za-z])/);
+      if (m) {
+        const code = m[1].replace(/^\[1;\d+([A-DHF])$/, "[$1");
+        touches.push({ nom: SEQUENCES_TOUCHES[code] ?? "inconnue" });
+        i += 1 + m[1].length;
+      } else {
+        touches.push({ nom: "escape" });
+        i += 1;
+      }
+      continue;
+    }
+    if (c === "\r" || c === "\n") {
+      touches.push({ nom: "return" });
+      i += c === "\r" && s[i + 1] === "\n" ? 2 : 1;
+      continue;
+    }
+    if (c === "\x7f" || c === "\b") {
+      touches.push({ nom: "backspace" });
+      i += 1;
+      continue;
+    }
+    if (c === "\t") {
+      touches.push({ nom: "tab" });
+      i += 1;
+      continue;
+    }
+    const code = c.charCodeAt(0);
+    if (code < 32) {
+      touches.push({ nom: String.fromCharCode(code + 96), ctrl: true });
+      i += 1;
+      continue;
+    }
+    let j = i;
+    while (j < s.length && s.charCodeAt(j) >= 32 && s[j] !== "\x7f") j++;
+    touches.push({ texte: s.slice(i, j) });
+    i = j;
+  }
+  return touches;
+}
+
+/** Replie un texte à la largeur, sur les espaces. */
+function plier(texte, largeur) {
+  const lignes = [];
+  let courante = "";
+  for (const mot of String(texte).split(/\s+/)) {
+    if (courante && (courante + " " + mot).length > largeur) {
+      lignes.push(courante);
+      courante = mot;
+    } else courante = courante ? `${courante} ${mot}` : mot;
+  }
+  if (courante) lignes.push(courante);
+  return lignes;
+}
+
+/** Un projet par son nom (exact, puis début, puis morceau) ou le début de son identifiant. */
+function trouverProjet(projets, requete) {
+  const q = String(requete ?? "").trim().toLowerCase();
+  if (!q) return null;
+  return (
+    projets.find((p) => p.name.toLowerCase() === q) ??
+    projets.find((p) => String(p.id).toLowerCase().startsWith(q)) ??
+    projets.find((p) => p.name.toLowerCase().startsWith(q)) ??
+    projets.find((p) => p.name.toLowerCase().includes(q)) ??
+    null
+  );
+}
+
+/** Les entrées du menu « / » : les commandes de la CLI par groupe, puis celles de la console. */
+function entreesConsole(l = langue()) {
+  const liste = [];
+  for (const g of GROUPES) for (const nom of g.commandes) if (!HORS_CONSOLE.has(nom)) liste.push({ nom, texte: COMMANDES[nom].resume[l], valeur: `/${nom}` });
+  for (const [nom, texte] of Object.entries(SESSION_CONSOLE)) liste.push({ nom, texte: texte[l], valeur: `/${nom}`, session: true, argument: nom === "projet" });
+  return liste;
+}
+
+/** Ce que la liste propose pour la saisie en cours, ou rien. */
+function suggestionsConsole(saisie, options = {}) {
+  const { projets = [], l = langue() } = /** @type {{ projets?: { id: string, name: string, url: string }[], l?: "fr" | "en" }} */ (options);
+  const projet = saisie.match(/^\/?(?:projet|project)\s+(.*)$/i);
+  if (projet) {
+    const q = projet[1].toLowerCase();
+    const tous = { nom: t("tous", "all"), texte: t("revenir à tous les projets", "back to every project"), valeur: `/projet ${t("tous", "all")}` };
+    return [tous, ...projets.map((p) => ({ nom: p.name, texte: adresseCourte(p.url), valeur: `/projet ${p.name}` }))].filter((e) => e.nom.toLowerCase().includes(q));
+  }
+  const page = saisie.match(/^\/?open\s+(\S*)$/i);
+  if (page) return PAGES_OPEN.filter((p) => p.startsWith(page[1].toLowerCase())).map((p) => ({ nom: p, texte: "", valeur: `/open ${p}` }));
+  if (/^\/\S*$/.test(saisie)) {
+    const q = saisie.slice(1).toLowerCase();
+    return entreesConsole(l).filter((e) => e.nom.startsWith(q) || (q && Object.entries(ALIAS_CONSOLE).some(([a, cible]) => cible === e.nom && a.startsWith(q))));
+  }
+  return [];
+}
+
+function cheminHistorique() {
+  return join(dirname(cheminConfig()), "historique");
+}
+
+function lireHistorique() {
+  try {
+    return readFileSync(cheminHistorique(), "utf8").split("\n").filter(Boolean).slice(-HISTORIQUE_MAX);
+  } catch {
+    return [];
+  }
+}
+
+function ecrireHistorique(lignes) {
+  try {
+    mkdirSync(dirname(cheminHistorique()), { recursive: true });
+    // Jamais une clé dans l'historique, même collée par erreur.
+    writeFileSync(cheminHistorique(), lignes.slice(-HISTORIQUE_MAX).map(masquer).join("\n") + "\n");
+  } catch {
+    // pas grave : l'historique est un confort
+  }
+}
+
+/**
+ * Lance la console. `commandes` : les fonctions de la CLI (postship.mjs
+ * les passe, pour éviter un import circulaire). Rend 0 en quittant.
+ */
+function lancerConsole(commandes, { entree = process.stdin, sortie = process.stdout, intervalle = 30_000 } = {}) {
+  const l = langue();
+  const u = unicode();
+  const B = u ? { h: "─", v: "│", hg: "╭", hd: "╮", bg: "╰", bd: "╯" } : { h: "-", v: "|", hg: "+", hd: "+", bg: "+", bd: "+" };
+  const ecrireZone = sortie.write.bind(sortie);
+
+  const etat = {
+    saisie: "",
+    curseur: 0,
+    histo: lireHistorique(),
+    iHisto: -1,
+    brouillon: "",
+    menu: [],
+    sel: 0,
+    menuFerme: false,
+    hauteur: 0,
+    occupe: false,
+    clavierCommande: false,
+    attente: [],
+    moi: null,
+    projets: [],
+    ouverts: new Map(),
+    majLe: null,
+    erreur: null,
+    projet: lireProjet(undefined),
+    notifier: false,
+    dernierCtrlC: 0,
+    alerte: null,
+    versionDispo: null,
+    jeton: null,
+    pret: false,
+    fin: false,
+  };
+
+  // Chaque commande tourne dans son propre contexte : une commande annulée
+  // (Ctrl+C) continue peut-être en arrière-plan, mais plus rien d'elle ne
+  // s'écrit — ni ses lignes, ni sa roue.
+  const als = new AsyncLocalStorage();
+  const muet = () => als.getStore()?.annule === true;
+  const origines = { log: console.log, error: console.error, out: process.stdout.write, err: process.stderr.write };
+  console.log = (...a) => {
+    if (!muet()) origines.log.apply(console, a);
+  };
+  console.error = (...a) => {
+    if (!muet()) origines.error.apply(console, a);
+  };
+  process.stdout.write = function (...a) {
+    return muet() ? true : origines.out.apply(process.stdout, a);
+  };
+  process.stderr.write = function (...a) {
+    return muet() ? true : origines.err.apply(process.stderr, a);
+  };
+
+  const largeur = () => Math.max(30, (sortie.columns || 80) - 1);
+  const hauteurMax = () => Math.max(6, (sortie.rows || 24) - 2);
+  const nomProjet = (id) => etat.projets.find((p) => p.id === id || String(p.id).startsWith(String(id)))?.name ?? (id ? String(id).slice(0, 8) : null);
+  const totalOuverts = () => [...etat.ouverts.values()].reduce((n, liste) => n + (liste?.length ?? 0), 0);
+
+  function ligneStatut(w) {
+    let droite = peindre("dim", w < 90 ? t("? aide", "? help") : t("/ commandes · ? aide", "/ commands · ? help"));
+    let gauche;
+    if (etat.alerte) gauche = peindre("yellow", etat.alerte);
+    else if (!etat.moi && !lireJeton()) gauche = `${peindre("dim", u ? "○" : "o")} ${t("non connecté — tapez login", "not signed in — type login")}`;
+    else if (!etat.moi) gauche = etat.erreur ? `${symbole("error")} ${peindre("yellow", etat.erreur)}` : peindre("dim", t("lecture de vos projets…", "reading your projects…"));
+    else {
+      const n = totalOuverts();
+      const heure = new Date(etat.majLe).toLocaleTimeString(l === "fr" ? "fr-FR" : "en-GB", { hour: "2-digit", minute: "2-digit" });
+      // Du plus utile au moins utile : ce qui ne tient pas tombe par la fin.
+      const morceaux = [
+        `${peindre(n > 0 ? "red" : "green", u ? "●" : "*")} ${peindre("bold", etat.projet ? nomProjet(etat.projet) : t("tous les projets", "every project"))}`,
+        n === 0 ? peindre("green", t("rien d'ouvert", "nothing open")) : peindre("red", n === 1 ? t("1 incident ouvert", "1 open incident") : t("{0} incidents ouverts", "{0} open incidents", n)),
+        etat.erreur ? peindre("yellow", t("hors ligne", "offline")) : peindre("dim", t("à jour à {0}", "as of {0}", heure)),
+        nomPlan(etat.moi.plan),
+        peindre("dim", t("{0}/{1} vérifications", "{0}/{1} checks", etat.moi.quota.used, etat.moi.quota.limit)),
+        etat.notifier ? peindre("dim", t("notifications", "notifications")) : "",
+      ].filter(Boolean);
+      const place = w - 5 - visible(droite).length;
+      while (morceaux.length > 1 && visible(morceaux.join(" · ")).length > place) morceaux.pop();
+      gauche = morceaux.join(peindre("dim", " · "));
+    }
+    if (visible(gauche).length > w - 5 - visible(droite).length) droite = peindre("dim", t("? aide", "? help"));
+    const place = w - 5 - visible(droite).length;
+    return `  ${completer(tronquer(gauche, place), place)}   ${droite}`;
+  }
+
+  /** La zone du bas : le cadre de saisie, la liste, la ligne d'état. */
+  function zone() {
+    const w = largeur();
+    const lignes = [];
+    const interieur = w - 6;
+    lignes.push(peindre("dim", B.hg + B.h.repeat(w - 2) + B.hd));
+    let texte;
+    let col;
+    if (!etat.saisie) {
+      texte = peindre("dim", tronquer(t("Tapez une commande — check example.com, wait --head… — ou / pour la liste", "Type a command — check example.com, wait --head… — or / for the list"), interieur));
+      col = 0;
+    } else {
+      const debut = Math.max(0, etat.curseur - interieur + 1);
+      texte = etat.saisie.slice(debut, debut + interieur);
+      col = etat.curseur - debut;
+    }
+    lignes.push(`${peindre("dim", B.v)} ${peindre("signal", "›")} ${completer(texte, interieur)} ${peindre("dim", B.v)}`);
+    lignes.push(peindre("dim", B.bg + B.h.repeat(w - 2) + B.bd));
+    const menu = etat.menuFerme ? [] : etat.menu;
+    const place = Math.max(0, Math.min(8, hauteurMax() - 4));
+    if (menu.length > 0 && place > 0) {
+      const debut = Math.min(Math.max(0, etat.sel - place + 1), Math.max(0, menu.length - place));
+      const vus = menu.slice(debut, debut + place);
+      const affiche = (e) => (/\s/.test(e.valeur) ? e.nom : `/${e.nom}`);
+      const largNom = Math.min(26, Math.max(...vus.map((e) => affiche(e).length)) + 2);
+      vus.forEach((e, i) => {
+        const actif = debut + i === etat.sel;
+        const nom = affiche(e);
+        const ligne = `  ${actif ? peindre("signal", "›") : " "} ${actif ? peindre("signal", peindre("bold", nom.padEnd(largNom))) : nom.padEnd(largNom)} ${peindre("dim", e.texte)}`;
+        lignes.push(tronquer(ligne, w));
+      });
+      if (menu.length > place) lignes.push(peindre("dim", `    ${t("{0} de plus — continuez à taper", "{0} more — keep typing", menu.length - place)}`));
+    }
+    lignes.push(ligneStatut(w));
+    return { lignes, col: 4 + col };
+  }
+
+  function dessiner() {
+    if (!etat.pret || etat.occupe || etat.fin) return;
+    const { lignes, col } = zone();
+    let s = "";
+    // Le curseur est sur la ligne de saisie (la 2e de la zone) : on remonte d'une ligne au cadre.
+    if (etat.hauteur > 0) s += "\x1b[1A\r";
+    s += "\x1b[J" + lignes.join("\n");
+    const monter = lignes.length - 2;
+    if (monter > 0) s += `\x1b[${monter}A`;
+    s += "\r" + (col > 0 ? `\x1b[${col}C` : "");
+    ecrireZone(s);
+    etat.hauteur = lignes.length;
+  }
+
+  function effacer() {
+    if (etat.hauteur === 0) return;
+    ecrireZone("\x1b[1A\r\x1b[J");
+    etat.hauteur = 0;
+  }
+
+  /** Des lignes au-dessus de l'invite (événements en direct, messages de la console). */
+  function auDessus(texte) {
+    if (etat.occupe) {
+      etat.attente.push(texte);
+      return;
+    }
+    effacer();
+    ecrireZone(`${texte}\n`);
+    dessiner();
+  }
+
+  function majMenu() {
+    etat.menu = suggestionsConsole(etat.saisie, { projets: etat.projets, l });
+    if (etat.sel >= etat.menu.length) etat.sel = 0;
+  }
+
+  function poser(saisie, curseur = saisie.length) {
+    etat.saisie = saisie;
+    etat.curseur = curseur;
+    etat.menuFerme = false;
+    etat.sel = 0;
+    majMenu();
+  }
+
+  // --- les données en direct -------------------------------------------
+
+  async function rafraichir(annoncer = true) {
+    if (etat.fin) return;
+    if (!lireJeton()) {
+      Object.assign(etat, { moi: null, projets: [], ouverts: new Map(), majLe: Date.now(), erreur: null });
+      dessiner();
+      return;
+    }
+    try {
+      const [moi, liste] = await Promise.all([appelAuthentifie("GET", "/api/v1/me"), appelAuthentifie("GET", "/api/v1/projects")]);
+      const projets = liste?.projects ?? [];
+      const suivis = projets.filter((p) => !p.paused).slice(0, PROJETS_SUIVIS_CONSOLE);
+      const lus = await Promise.all(suivis.map((p) => appelAuthentifie("GET", `/api/v1/projects/${encodeURIComponent(p.id)}/incidents`).catch(() => null)));
+      const ouverts = new Map(suivis.map((p, i) => [p.id, lus[i] ? (lus[i].incidents ?? []) : (etat.ouverts.get(p.id) ?? [])]));
+      if (annoncer && etat.moi) {
+        const cle = (i) => `${i.url}|${i.kind ?? ""}`;
+        const heure = new Date().toLocaleTimeString(l === "fr" ? "fr-FR" : "en-GB", { hour: "2-digit", minute: "2-digit" });
+        const lignes = [];
+        const titres = [];
+        for (const p of suivis) {
+          const avant = new Set((etat.ouverts.get(p.id) ?? []).map(cle));
+          const apres = new Set((ouverts.get(p.id) ?? []).map(cle));
+          if (!etat.ouverts.has(p.id)) continue;
+          for (const i of ouverts.get(p.id) ?? []) {
+            if (avant.has(cle(i))) continue;
+            lignes.push(`${peindre("dim", heure)}  ${symbole("fail")} ${peindre("red", t("incident ouvert", "incident opened"))}  ${adresseCourte(i.url)} ${peindre("dim", `· ${p.name}`)}`);
+            titres.push(adresseCourte(i.url));
+          }
+          for (const i of etat.ouverts.get(p.id) ?? []) {
+            if (apres.has(cle(i))) continue;
+            lignes.push(`${peindre("dim", heure)}  ${symbole("pass")} ${peindre("green", t("résolu", "resolved"))}  ${adresseCourte(i.url)} ${peindre("dim", `· ${p.name}`)}`);
+            titres.push(adresseCourte(i.url));
+          }
+        }
+        if (lignes.length > 0) {
+          sonner();
+          if (etat.notifier) notifierBureau(t("PostShip — {0} changement(s)", "PostShip — {0} change(s)", lignes.length), titres.join(", "));
+          Object.assign(etat, { moi, projets, ouverts, majLe: Date.now(), erreur: null });
+          auDessus(lignes.join("\n"));
+          return;
+        }
+      }
+      Object.assign(etat, { moi, projets, ouverts, majLe: Date.now(), erreur: null });
+    } catch (e) {
+      etat.erreur = e?.message ?? String(e);
+    }
+    dessiner();
+  }
+
+  // --- l'accueil ---------------------------------------------------------
+
+  function accueil() {
+    const w = Math.min(largeur(), 78);
+    const interieur = w - 4;
+    const cadre = (texte = "") => `${peindre("dim", B.v)} ${completer(tronquer(texte, interieur), interieur)} ${peindre("dim", B.v)}`;
+    const lignes = [peindre("dim", B.hg + B.h.repeat(w - 2) + B.hd)];
+    lignes.push(cadre(`${peindre("signal", peindre("bold", "<>"))} ${peindre("bold", "postship")} ${peindre("dim", VERSION.startsWith("__") ? "dev" : VERSION)}`));
+    lignes.push(cadre());
+    lignes.push(cadre(`  ${t("Vos déploiements, vérifiés depuis le terminal.", "Your deploys, checked from the terminal.")}`));
+    lignes.push(cadre());
+    if (etat.moi) {
+      lignes.push(cadre(`  ${peindre("bold", nomPlan(etat.moi.plan))} ${peindre("dim", "·")} ${jaugeQuota(etat.moi.quota.used, etat.moi.quota.limit)} ${peindre("dim", t("vérifications ce mois", "checks this month"))}`));
+      if (etat.projet) lignes.push(cadre(`  ${t("Projet de la session", "Session project")} : ${peindre("bold", nomProjet(etat.projet))} ${peindre("dim", "(.postship.json)")}`));
+    } else if (!lireJeton()) {
+      lignes.push(cadre(`  ${t("Ce terminal n'est pas connecté : tapez", "This terminal is not signed in: type")} ${peindre("bold", "login")}.`));
+    } else if (etat.erreur) {
+      lignes.push(cadre(`  ${symbole("error")} ${etat.erreur}`));
+    }
+    if (etat.versionDispo) lignes.push(cadre(`  ${peindre("yellow", t("postship {0} est disponible", "postship {0} is available", etat.versionDispo))} ${peindre("dim", "— /update")}`));
+    lignes.push(peindre("dim", B.bg + B.h.repeat(w - 2) + B.bd));
+    ecrireZone(`\n${lignes.join("\n")}\n`);
+
+    if (etat.moi && etat.projets.length > 0) {
+      ecrireZone("\n");
+      const liste = etat.projets.slice(0, 8);
+      const largNom = Math.max(...liste.map((p) => p.name.length));
+      const largUrl = Math.max(...liste.map((p) => adresseCourte(p.url).length));
+      const avecAdresse = largNom + largUrl + 40 <= largeur();
+      for (const p of liste) {
+        const etatP = p.paused ? "muted" : p.status;
+        const n = etat.ouverts.get(p.id)?.length;
+        const incidents = p.paused ? peindre("dim", t("en pause", "paused")) : n ? peindre("red", n === 1 ? t("1 incident ouvert", "1 open incident") : t("{0} incidents ouverts", "{0} open incidents", n)) : peindre("dim", t("rien d'ouvert", "nothing open"));
+        const adresse = avecAdresse ? `  ${peindre("dim", adresseCourte(p.url).padEnd(largUrl))}` : "";
+        ecrireZone(`${tronquer(`  ${peindre(TEINTE[etatP] ?? "dim", u ? "●" : "*")} ${p.name.padEnd(largNom)}${adresse}  ${verdict(etatP)}  ${incidents}`, largeur())}\n`);
+      }
+      if (etat.projets.length > liste.length) ecrireZone(peindre("dim", `  ${t("… et {0} autres — projects pour la liste", "… and {0} more — projects for the list", etat.projets.length - liste.length)}\n`));
+    }
+    const large = largeur();
+    const essais = ["check example.com", "wait --head", "incidents", "/projet"];
+    const lignesEssai = [];
+    let courante = `  ${t("Essayez", "Try")} `;
+    for (const e of essais) {
+      if (visible(courante).length + e.length + 3 > large && lignesEssai.length < 3) {
+        lignesEssai.push(courante);
+        courante = "   ";
+      }
+      courante += ` ${e} ·`;
+    }
+    lignesEssai.push(courante.replace(/ ·$/, ""));
+    ecrireZone(`\n${lignesEssai.map((x) => x.replace(/^( +\S*)/, (m) => peindre("dim", m)).replace(/ · /g, peindre("dim", " · "))).join("\n")}\n`);
+    const astuce = t("Un incident qui s'ouvre ou se ferme s'affiche ici tout seul : la console relit vos projets toutes les 30 s.", "An incident opening or closing shows up here on its own: the console reads your projects every 30 s.");
+    ecrireZone(`${plier(astuce, large - 2).map((x) => peindre("dim", `  ${x}`)).join("\n")}\n\n`);
+  }
+
+  function afficherAide() {
+    const lignes = [];
+    for (const g of GROUPES) {
+      lignes.push(`  ${peindre("bold", g[l])}`);
+      for (const nom of g.commandes) if (!HORS_CONSOLE.has(nom)) lignes.push(`    ${nom.padEnd(12)} ${peindre("dim", COMMANDES[nom].resume[l])}`);
+      lignes.push("");
+    }
+    lignes.push(`  ${peindre("bold", t("La console", "The console"))}`);
+    for (const [nom, texte] of Object.entries(SESSION_CONSOLE)) lignes.push(`    ${`/${nom}`.padEnd(12)} ${peindre("dim", texte[l])}`);
+    lignes.push("");
+    lignes.push(`  ${peindre("bold", t("Raccourcis", "Shortcuts"))}`);
+    const raccourcis = [
+      ["/", t("la liste des commandes", "the command list")],
+      ["Tab", t("compléter (commande, projet, page)", "complete (command, project, page)")],
+      [u ? "↑ ↓" : "Up Down", t("l'historique, ou la liste quand elle est ouverte", "history, or the list when it is open")],
+      [t("Échap", "Esc"), t("fermer la liste, vider la ligne, annuler la commande en cours", "close the list, clear the line, cancel the running command")],
+      ["Ctrl+C", t("annuler la commande en cours · deux fois pour quitter", "cancel the running command · twice to quit")],
+      ["Ctrl+L", t("effacer l'écran", "clear the screen")],
+      ["Ctrl+D", t("quitter", "quit")],
+    ];
+    for (const [k, v] of raccourcis) lignes.push(`    ${k.padEnd(12)} ${peindre("dim", v)}`);
+    lignes.push("");
+    lignes.push(peindre("dim", `  ${t("Chaque commande accepte ses options : check example.com --min-score 80, wait --head --notify… help <commande> pour le détail.", "Every command takes its options: check example.com --min-score 80, wait --head --notify… help <command> for details.")}`));
+    ecrireZone(`${lignes.join("\n")}\n`);
+  }
+
+  // --- l'exécution -------------------------------------------------------
+
+  function dormirAnnulable(jeton) {
+    return (ms) =>
+      new Promise((resolve, reject) => {
+        const minuterie = setTimeout(resolve, ms);
+        jeton.reveil = () => {
+          clearTimeout(minuterie);
+          reject(new ErreurCli(t("Annulé.", "Cancelled."), 2));
+        };
+      });
+  }
+
+  function annulerCommande() {
+    const jeton = etat.jeton;
+    if (!jeton || jeton.annule) return;
+    jeton.annule = true;
+    jeton.reveil?.();
+    jeton.lacher?.();
+  }
+
+  async function executerLigne(brut) {
+    const argv = decouperLigne(brut.replace(/^\//, ""));
+    if (argv[0] === "postship") argv.shift();
+    if (argv.length === 0) return;
+    const nom = ALIAS_CONSOLE[argv[0].toLowerCase()] ?? argv[0].toLowerCase();
+    const reste = argv.slice(1);
+
+    if (nom === "quitter") return "quitter";
+    if (nom === "effacer") {
+      ecrireZone("\x1b[2J\x1b[H");
+      return;
+    }
+    if (nom === "aide" && reste.length === 0) {
+      afficherAide();
+      return;
+    }
+    if (nom === "version") {
+      ecrireZone(`postship ${VERSION.startsWith("__") ? "dev" : VERSION}\n`);
+      return;
+    }
+    if (nom === "projet") {
+      const q = reste.join(" ");
+      if (!q) return "choisir-projet";
+      if (/^(tous|all|aucun|none)$/i.test(q)) {
+        etat.projet = null;
+        ecrireZone(`${symbole("pass")} ${t("Tous les projets.", "Every project.")}\n`);
+        return;
+      }
+      const p = trouverProjet(etat.projets, q);
+      if (!p) {
+        ecrireZone(`${symbole("fail")} ${t("Aucun projet ne répond à « {0} ». Tapez /projet puis Tab pour la liste.", "No project matches “{0}”. Type /projet then Tab for the list.", q)}\n`);
+        return;
+      }
+      etat.projet = p.id;
+      ecrireZone(`${symbole("pass")} ${t("Projet de la session : {0} — incidents, ship, wait, check, open s'y rapportent.", "Session project: {0} — incidents, ship, wait, check, open refer to it.", peindre("bold", p.name))}\n`);
+      return;
+    }
+    if (nom === "notifier") {
+      const v = (reste[0] ?? "").toLowerCase();
+      etat.notifier = v === "off" || v === "non" || v === "no" ? false : v === "on" || v === "oui" || v === "yes" ? true : !etat.notifier;
+      ecrireZone(`${symbole("pass")} ${etat.notifier ? t("Notifications du bureau activées pour cette session.", "Desktop notifications on for this session.") : t("Notifications du bureau coupées.", "Desktop notifications off.")}\n`);
+      return;
+    }
+    if (nom === "watch") {
+      ecrireZone(`${t("La console suit déjà vos projets toutes les 30 s : chaque incident ouvert ou résolu s'affiche ici, avec une sonnerie. /notifier active aussi les notifications du bureau.", "The console already follows your projects every 30 s: every incident opened or resolved shows up here, with a ring. /notifier also turns on desktop notifications.")}\n`);
+      return;
+    }
+    if (nom === "completion") {
+      ecrireZone(`${t("Hors de la console : postship completion bash >> ~/.bashrc (ou zsh, fish, powershell).", "Outside the console: postship completion bash >> ~/.bashrc (or zsh, fish, powershell).")}\n`);
+      return;
+    }
+    // « help check » : l'aide détaillée de la commande, comme hors de la console.
+    const fn = nom === "aide" ? commandes.help : commandes[nom];
+    if (!fn) {
+      ecrireZone(`${symbole("fail")} ${t("Commande inconnue : {0}. Tapez / pour la liste.", "Unknown command: {0}. Type / for the list.", argv[0])}\n`);
+      return;
+    }
+    const args = parseArgs([nom === "aide" ? "help" : nom, ...reste]);
+    if (args.token !== undefined) {
+      ecrireZone(`${symbole("fail")} ${t("--token n'existe pas : login, ou POSTSHIP_TOKEN.", "--token does not exist: login, or POSTSHIP_TOKEN.")}\n`);
+      return;
+    }
+    if (AVEC_PROJET.has(nom) && args.project === undefined && etat.projet) args.project = etat.projet;
+
+    const jeton = { annule: false };
+    let apres = null;
+    etat.jeton = jeton;
+    etat.occupe = true;
+    etat.clavierCommande = AVEC_CLAVIER.has(nom);
+    let resultat;
+    try {
+      resultat = await new Promise((resolve, reject) => {
+        jeton.lacher = () => resolve("annule");
+        als.run(jeton, () => {
+          Promise.resolve()
+            .then(() => fn(args, { dormir: dormirAnnulable(jeton), surFin: (quoi) => (apres = quoi) }))
+            .then(resolve, reject);
+        });
+      });
+    } catch (e) {
+      if (!jeton.annule) ecrireZone(`${peindre("red", masquer(e?.message ?? String(e)))}\n`);
+    } finally {
+      etat.occupe = false;
+      etat.clavierCommande = false;
+      etat.jeton = null;
+      // init et uninstall relâchent le clavier en finissant : on le reprend.
+      if (entree.isTTY) {
+        entree.setRawMode?.(true);
+        entree.resume();
+      }
+    }
+    if (resultat === "annule") ecrireZone(`\r\x1b[2K${peindre("dim", t("Annulé.", "Cancelled."))}\n`);
+    if ((nom === "login" || nom === "logout") && !jeton.annule) await rafraichir(false);
+    if (apres === "uninstall") return "quitter";
+    if (apres === "update") {
+      ecrireZone(`${t("Relancez postship pour ouvrir la nouvelle version.", "Run postship again to open the new version.")}\n`);
+      return "quitter";
+    }
+  }
+
+  // --- le clavier --------------------------------------------------------
+
+  return new Promise((resolveConsole) => {
+    let minuterie = null;
+
+    function quitter() {
+      if (etat.fin) return;
+      etat.fin = true;
+      clearInterval(minuterie);
+      if (etat.hauteur > 0) {
+        ecrireZone("\x1b[1A\r\x1b[J");
+        etat.hauteur = 0;
+      }
+      entree.off("data", surDonnees);
+      sortie.off?.("resize", surRedimension);
+      entree.setRawMode?.(false);
+      entree.pause();
+      console.log = origines.log;
+      console.error = origines.error;
+      process.stdout.write = origines.out;
+      process.stderr.write = origines.err;
+      ecrireHistorique(etat.histo);
+      ecrireZone(`${peindre("dim", t("À bientôt.", "See you."))}\n`);
+      resolveConsole(0);
+    }
+
+    async function soumettre(ligne) {
+      const brut = ligne.trim();
+      poser("");
+      etat.iHisto = -1;
+      effacer();
+      if (!brut) {
+        dessiner();
+        return;
+      }
+      ecrireZone(`${peindre("signal", "›")} ${peindre("bold", masquer(brut))}\n`);
+      if (etat.histo[etat.histo.length - 1] !== brut) etat.histo.push(brut);
+      if (etat.histo.length > HISTORIQUE_MAX) etat.histo.shift();
+      ecrireHistorique(etat.histo);
+      const suite = await executerLigne(brut);
+      if (suite === "quitter") return quitter();
+      ecrireZone("\n");
+      for (const x of etat.attente.splice(0)) ecrireZone(`${x}\n`);
+      if (suite === "choisir-projet") poser("/projet ");
+      dessiner();
+    }
+
+    function surDonnees(donnees) {
+      for (const touche of lireTouches(donnees)) surTouche(touche);
+    }
+
+    function surTouche(touche) {
+      const cle = { name: touche.nom, ctrl: touche.ctrl === true };
+      const str = touche.texte;
+      if (etat.fin || etat.clavierCommande) return;
+      if (etat.occupe) {
+        if ((cle.ctrl && cle.name === "c") || cle.name === "escape") annulerCommande();
+        return;
+      }
+      if (cle.ctrl && cle.name === "c") {
+        if (etat.saisie) {
+          poser("");
+        } else if (Date.now() - etat.dernierCtrlC < 2000) {
+          return quitter();
+        } else {
+          etat.dernierCtrlC = Date.now();
+          etat.alerte = t("Ctrl+C encore pour quitter", "Ctrl+C again to quit");
+          setTimeout(() => {
+            etat.alerte = null;
+            dessiner();
+          }, 2000).unref?.();
+        }
+        return dessiner();
+      }
+      if (cle.ctrl && cle.name === "d") {
+        if (!etat.saisie) return quitter();
+        return;
+      }
+      if (cle.ctrl && cle.name === "l") {
+        ecrireZone("\x1b[2J\x1b[H");
+        etat.hauteur = 0;
+        return dessiner();
+      }
+      const menu = etat.menuFerme ? [] : etat.menu;
+      switch (cle.name) {
+        case "return":
+        case "enter": {
+          if (menu.length > 0) {
+            const e = menu[etat.sel];
+            // Une commande qui attend son argument (projet) se complète ; les autres partent.
+            if (e.argument) {
+              poser(`${e.valeur} `);
+              return dessiner();
+            }
+            if (!/\s/.test(etat.saisie) || etat.saisie.trim() !== e.valeur) return void soumettre(e.valeur);
+          }
+          return void soumettre(etat.saisie);
+        }
+        case "tab": {
+          if (menu.length > 0) {
+            const e = menu[etat.sel];
+            poser(/\s/.test(e.valeur) ? e.valeur : `${e.valeur} `);
+            if (/^\/?(projet|project) \S/.test(etat.saisie) || /^\/?open \S/.test(etat.saisie)) etat.menuFerme = true;
+            return dessiner();
+          }
+          if (etat.saisie && !/\s/.test(etat.saisie) && !etat.saisie.startsWith("/")) {
+            poser(`/${etat.saisie}`);
+            if (etat.menu.length === 1) poser(`${etat.menu[0].valeur} `);
+          } else if (!etat.saisie) {
+            poser("/");
+          }
+          return dessiner();
+        }
+        case "escape":
+          if (menu.length > 0) etat.menuFerme = true;
+          else poser("");
+          return dessiner();
+        case "up":
+          if (menu.length > 0) {
+            etat.sel = (etat.sel - 1 + menu.length) % menu.length;
+            return dessiner();
+          }
+          if (etat.histo.length === 0) return;
+          if (etat.iHisto === -1) {
+            etat.brouillon = etat.saisie;
+            etat.iHisto = etat.histo.length - 1;
+          } else etat.iHisto = Math.max(0, etat.iHisto - 1);
+          etat.saisie = etat.histo[etat.iHisto];
+          etat.curseur = etat.saisie.length;
+          etat.menuFerme = true;
+          return dessiner();
+        case "down":
+          if (menu.length > 0) {
+            etat.sel = (etat.sel + 1) % menu.length;
+            return dessiner();
+          }
+          if (etat.iHisto === -1) return;
+          etat.iHisto += 1;
+          if (etat.iHisto >= etat.histo.length) {
+            etat.iHisto = -1;
+            etat.saisie = etat.brouillon;
+          } else etat.saisie = etat.histo[etat.iHisto];
+          etat.curseur = etat.saisie.length;
+          etat.menuFerme = true;
+          return dessiner();
+        case "left":
+          etat.curseur = Math.max(0, etat.curseur - 1);
+          return dessiner();
+        case "right":
+          etat.curseur = Math.min(etat.saisie.length, etat.curseur + 1);
+          return dessiner();
+        case "home":
+          etat.curseur = 0;
+          return dessiner();
+        case "end":
+          etat.curseur = etat.saisie.length;
+          return dessiner();
+        case "backspace":
+          if (etat.curseur === 0) return;
+          poser(etat.saisie.slice(0, etat.curseur - 1) + etat.saisie.slice(etat.curseur), etat.curseur - 1);
+          return dessiner();
+        case "delete":
+          poser(etat.saisie.slice(0, etat.curseur) + etat.saisie.slice(etat.curseur + 1), etat.curseur);
+          return dessiner();
+        default:
+          break;
+      }
+      if (cle.ctrl) {
+        if (cle.name === "a") etat.curseur = 0;
+        else if (cle.name === "e") etat.curseur = etat.saisie.length;
+        else if (cle.name === "u") poser(etat.saisie.slice(etat.curseur), 0);
+        else if (cle.name === "k") poser(etat.saisie.slice(0, etat.curseur), etat.curseur);
+        else if (cle.name === "w") {
+          const avant = etat.saisie.slice(0, etat.curseur).replace(/\S+\s*$/, "");
+          poser(avant + etat.saisie.slice(etat.curseur), avant.length);
+        }
+        return dessiner();
+      }
+      if (typeof str === "string" && str.length > 0) {
+        if (str === "?" && !etat.saisie) {
+          effacer();
+          afficherAide();
+          ecrireZone("\n");
+          return dessiner();
+        }
+        poser(etat.saisie.slice(0, etat.curseur) + str + etat.saisie.slice(etat.curseur), etat.curseur + str.length);
+        return dessiner();
+      }
+    }
+
+    function surRedimension() {
+      if (!etat.occupe) dessiner();
+    }
+
+    (async () => {
+      const attente = roue(t("Connexion à PostShip…", "Connecting to PostShip…"));
+      try {
+        const [, derniere] = await Promise.all([rafraichir(false), VERSION.startsWith("__") ? null : versionPubliee().catch(() => null)]);
+        if (derniere && plusRecente(VERSION, derniere)) etat.versionDispo = derniere;
+      } finally {
+        attente.fin();
+      }
+      etat.hauteur = 0;
+      accueil();
+      etat.pret = true;
+      entree.setRawMode?.(true);
+      entree.resume();
+      entree.on("data", surDonnees);
+      sortie.on?.("resize", surRedimension);
+      minuterie = setInterval(() => void rafraichir(true), intervalle);
+      minuterie.unref?.();
+      dessiner();
+    })().catch((e) => {
+      ecrireZone(`${peindre("red", masquer(e?.message ?? String(e)))}\n`);
+      quitter();
+    });
+  });
+}
+
 // ---- navigateur.mjs
 // Ouvrir une adresse dans le navigateur, sans dépendance : `start` sur
 // Windows, `open` sur macOS, `xdg-open` ailleurs. Rend false quand rien
@@ -772,65 +1807,6 @@ function ouvrirNavigateur(url) {
 /** « MacBook-de-Camille » → « MacBook de Camille » ; le nom de la machine, lisible. */
 function nomMachine() {
   return hostname().replace(/\.local$/i, "").replace(/[-_]+/g, " ").trim().slice(0, 80) || "cette machine";
-}
-
-// ---- version.mjs
-// L'avis de nouvelle version : au plus une fois par jour, une ligne
-// discrète sur la sortie d'erreur — jamais de mise à jour automatique.
-// Lu sur le registre npm, mémorisé à côté de la config. Muet en CI, sans
-// terminal, ou en --json : rien ne doit polluer une sortie qu'un script lit.
-
-
-
-
-
-const UN_JOUR = 86_400_000;
-
-function cheminCache() {
-  return join(dirname(cheminConfig()), "version-check.json");
-}
-
-/** a < b, sur « x.y.z » ; false si l'une n'est pas une version. */
-function plusRecente(a, b) {
-  const pa = String(a).split(".").map(Number);
-  const pb = String(b).split(".").map(Number);
-  if (pa.some(Number.isNaN) || pb.some(Number.isNaN) || pa.length < 3 || pb.length < 3) return false;
-  for (let i = 0; i < 3; i++) {
-    if (pb[i] > pa[i]) return true;
-    if (pb[i] < pa[i]) return false;
-  }
-  return false;
-}
-
-async function avisDeVersion({ json = false } = {}) {
-  if (json || process.env.CI === "true" || !process.stderr.isTTY || process.env.POSTSHIP_NO_UPDATE_NOTICE || VERSION.startsWith("__")) return;
-  let cache = {};
-  try {
-    cache = JSON.parse(readFileSync(cheminCache(), "utf8"));
-  } catch {
-    // premier passage
-  }
-  let derniere = cache.derniere;
-  if (!cache.verifieLe || Date.now() - new Date(cache.verifieLe).getTime() > UN_JOUR) {
-    try {
-      const controleur = new AbortController();
-      const minuterie = setTimeout(() => controleur.abort(), 1500);
-      const r = await fetch("https://registry.npmjs.org/postship/latest", { signal: controleur.signal, headers: { Accept: "application/json" } });
-      clearTimeout(minuterie);
-      if (r.ok) derniere = (await r.json()).version;
-    } catch {
-      // le registre ne répond pas : on retentera demain
-    }
-    try {
-      mkdirSync(dirname(cheminCache()), { recursive: true });
-      writeFileSync(cheminCache(), JSON.stringify({ verifieLe: new Date().toISOString(), derniere: derniere ?? null }));
-    } catch {
-      // pas grave
-    }
-  }
-  if (derniere && plusRecente(VERSION, derniere)) {
-    console.error(peindre("dim", t("postship {0} est disponible (vous avez {1}) : npm i -g postship", "postship {0} is available (you have {1}): npm i -g postship", derniere, VERSION)));
-  }
 }
 
 // ---- commands/check.mjs
@@ -1106,48 +2082,6 @@ async function urls(args) {
   if (liste.length === 0) ecrire(t("Aucune URL.", "No URL."));
   else tableau(liste.map((u) => [`  ${verdict(u.enabled ? u.outcome : "muted")}`, peindre("dim", u.kind ?? ""), adresseCourte(u.url), peindre("dim", relatif(u.lastCheckedAt))]));
   return 0;
-}
-
-// ---- notifier.mjs
-// Une notification du bureau, sans dépendance (28 sept. 2026) : pour
-// `postship wait --notify` (le ship est conclu, revenez) et
-// `postship watch --notify` (un incident s'ouvre ou se ferme).
-//
-// macOS : osascript ; Linux : notify-send ; Windows : un toast par
-// PowerShell. Le titre et le texte ne sont jamais collés dans une ligne
-// de commande : ils passent en arguments (osascript, notify-send) ou en
-// variables d'environnement (PowerShell) — une URL ou un libellé venus du
-// serveur ne peuvent donc rien exécuter. Rend false quand rien n'a pu
-// être lancé ; la sonnerie du terminal reste, elle, toujours là.
-
-
-const TOAST_WINDOWS = [
-  "$ErrorActionPreference='SilentlyContinue'",
-  "[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]",
-  "$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)",
-  "$t=$x.GetElementsByTagName('text')",
-  "[void]$t.Item(0).AppendChild($x.CreateTextNode($env:POSTSHIP_NOTIF_TITRE))",
-  "[void]$t.Item(1).AppendChild($x.CreateTextNode($env:POSTSHIP_NOTIF_TEXTE))",
-  "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))",
-].join("; ");
-
-function notifierBureau(titre, texte) {
-  if (process.env.POSTSHIP_NO_BROWSER || process.env.CI === "true") return false;
-  const t1 = masquer(titre).slice(0, 120);
-  const t2 = masquer(texte).slice(0, 240);
-  try {
-    const p =
-      process.platform === "darwin"
-        ? spawn("osascript", ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", t1, t2], { stdio: "ignore", detached: true })
-        : process.platform === "win32"
-          ? spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", TOAST_WINDOWS], { stdio: "ignore", detached: true, windowsHide: true, env: { ...process.env, POSTSHIP_NOTIF_TITRE: t1, POSTSHIP_NOTIF_TEXTE: t2 } })
-          : spawn("notify-send", ["--app-name=PostShip", t1, t2], { stdio: "ignore", detached: true });
-    p.on("error", () => {});
-    p.unref();
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 // ---- commands/wait.mjs
@@ -1866,6 +2800,150 @@ async function completion(args) {
   return 0;
 }
 
+// ---- commands/maj.mjs
+// `postship update` et `postship uninstall` (28 sept. 2026) : la CLI se
+// met à jour et se retire elle-même, avec le gestionnaire de paquets qui
+// l'a installée — npm, pnpm, yarn ou bun, reconnu au chemin du fichier
+// lancé. Une CLI lancée par npx, depuis la source ou dans l'action GitHub
+// n'est pas une installation globale : on dit quoi faire, sans rien tenter.
+
+
+
+
+
+
+
+
+/** Le gestionnaire global qui porte cette CLI, ou null (npx, source, action). */
+function installation(chemin = process.argv[1] ?? "") {
+  let reel = chemin;
+  try {
+    reel = realpathSync(chemin);
+  } catch {
+    // chemin fictif (tests) ou disparu : on lit tel quel
+  }
+  const p = String(reel).replace(/\\/g, "/").toLowerCase();
+  if (!p.includes("/node_modules/postship/") || p.includes("/_npx/")) return null;
+  if (p.includes("/pnpm/")) return { nom: "pnpm", installer: ["add", "-g", "postship@latest"], retirer: ["remove", "-g", "postship"] };
+  if (p.includes("/.bun/")) return { nom: "bun", installer: ["add", "-g", "postship@latest"], retirer: ["remove", "-g", "postship"] };
+  if (p.includes("/yarn/")) return { nom: "yarn", installer: ["global", "add", "postship@latest"], retirer: ["global", "remove", "postship"] };
+  return { nom: "npm", installer: ["install", "-g", "postship@latest"], retirer: ["uninstall", "-g", "postship"] };
+}
+
+/**
+ * Lance le gestionnaire, sa sortie sous les yeux. Sur Windows, npm est un
+ * .cmd : Node exige alors un shell ; les arguments sont fixes, jamais tapés.
+ */
+function lancerGestionnaire(nom, liste) {
+  const r = spawnSync(nom, liste, { stdio: "inherit", shell: process.platform === "win32" });
+  return r.status ?? 1;
+}
+
+/** Une question oui/non au clavier : « o » ou « y » valide, tout le reste renonce. */
+function confirmerClavier(question, { entree = process.stdin, sortie = process.stdout } = {}) {
+  return new Promise((resolve) => {
+    sortie.write(question);
+    const finir = (ok) => {
+      entree.setRawMode?.(false);
+      entree.pause();
+      entree.off("data", surTouche);
+      sortie.write(`${ok ? t("oui", "yes") : t("non", "no")}\n`);
+      resolve(ok);
+    };
+    const surTouche = (buf) => {
+      const s = buf.toString().toLowerCase();
+      if (s === "o" || s === "y") finir(true);
+      else if (s === "n" || s === "\r" || s === "\n" || s === "\u0003" || s === "\u001b") finir(false);
+    };
+    entree.setRawMode?.(true);
+    entree.resume();
+    entree.on("data", surTouche);
+  });
+}
+
+async function update(args, options = {}) {
+  const { executer = lancerGestionnaire, chemin, surFin, version = VERSION } = /** @type {{ executer?: (nom: string, liste: string[]) => number, chemin?: string, surFin?: (quoi: string) => void, version?: string }} */ (options);
+  if (version.startsWith("__")) {
+    ecrire(t("Version de développement (lancée depuis la source) : rien à mettre à jour.", "Development version (run from source): nothing to update."));
+    return 0;
+  }
+  const attente = roue(t("Recherche de la dernière version…", "Looking for the latest version…"));
+  let derniere;
+  try {
+    derniere = await versionPubliee({ forcer: true, delaiMs: 8000 });
+  } finally {
+    attente.fin();
+  }
+  if (!derniere) throw new ErreurCli(t("Le registre npm ne répond pas : réessayez dans un instant.", "The npm registry does not answer: try again in a moment."), 2);
+  if (!plusRecente(version, derniere)) {
+    ecrire(`${symbole("pass")} ${t("Déjà à jour : postship {0}.", "Already up to date: postship {0}.", version)}`);
+    return 0;
+  }
+  if (args.check === true) {
+    ecrire(t("postship {0} est disponible (vous avez {1}) : postship update.", "postship {0} is available (you have {1}): postship update.", derniere, version));
+    return 0;
+  }
+  const inst = installation(chemin);
+  if (!inst) throw new ErreurCli(t("Cette CLI ne vient pas d'une installation globale (npx, source ou action GitHub) : npm i -g postship@latest.", "This CLI is not a global install (npx, source or GitHub action): npm i -g postship@latest."), 2);
+  ecrire(peindre("dim", `  ${inst.nom} ${inst.installer.join(" ")}`));
+  const code = executer(inst.nom, inst.installer);
+  if (code !== 0) {
+    throw new ErreurCli(t("La mise à jour a échoué (code {0}). Sur macOS ou Linux, une installation globale demande parfois sudo : sudo {1} {2}", "The update failed (code {0}). On macOS or Linux, a global install sometimes needs sudo: sudo {1} {2}", code, inst.nom, inst.installer.join(" ")), 2);
+  }
+  ecrire(`${symbole("pass")} ${peindre("bold", `postship ${version} → ${derniere}`)}`);
+  surFin?.("update");
+  return 0;
+}
+
+/** Ce que la CLI a écrit sur la machine : la config (clé), le cache de version, l'historique de la console. */
+function fichiersCli() {
+  const dossier = dirname(cheminConfig());
+  return [cheminConfig(), cheminCacheVersion(), join(dossier, "historique")];
+}
+
+async function uninstall(args, options = {}) {
+  const { executer = lancerGestionnaire, chemin, confirmer = confirmerClavier, surFin } = /** @type {{ executer?: (nom: string, liste: string[]) => number, chemin?: string, confirmer?: (question: string) => Promise<boolean>, surFin?: (quoi: string) => void }} */ (options);
+  if (args.yes !== true) {
+    if (!process.stdin.isTTY) throw new ErreurCli(t("Hors d'un terminal, ajoutez --yes.", "Outside a terminal, add --yes."), 2);
+    const ok = await confirmer(t("Désinstaller postship ? La clé de ce terminal sera révoquée et sa configuration effacée. (o/N) ", "Uninstall postship? This terminal's key will be revoked and its configuration deleted. (y/N) "));
+    if (!ok) {
+      ecrire(t("Rien n'a changé.", "Nothing changed."));
+      return 0;
+    }
+  }
+  // 1. La clé : révoquée chez PostShip, pas seulement oubliée ici.
+  if (lireConfig().token) {
+    try {
+      await logout();
+    } catch (e) {
+      ecrire(peindre("yellow", e?.message ?? String(e)));
+    }
+  }
+  // 2. Les fichiers de la CLI, et leur dossier s'il est vide (jamais un dossier choisi par POSTSHIP_CONFIG).
+  for (const f of fichiersCli()) rmSync(f, { force: true });
+  if (!process.env.POSTSHIP_CONFIG) {
+    try {
+      const dossier = dirname(cheminConfig());
+      if (readdirSync(dossier).length === 0) rmdirSync(dossier);
+    } catch {
+      // déjà parti
+    }
+  }
+  ecrire(`${symbole("pass")} ${t("Configuration effacée.", "Configuration deleted.")}`);
+  // 3. Le paquet.
+  const inst = installation(chemin);
+  if (!inst) {
+    ecrire(t("Cette CLI ne vient pas d'une installation globale : retirez-la comme vous l'avez installée.", "This CLI is not a global install: remove it the way you installed it."));
+  } else {
+    const code = executer(inst.nom, inst.retirer);
+    if (code !== 0) throw new ErreurCli(t("La désinstallation a échoué (code {0}) : {1} {2}", "Uninstalling failed (code {0}): {1} {2}", code, inst.nom, inst.retirer.join(" ")), 2);
+    ecrire(`${symbole("pass")} ${t("postship est désinstallé. Merci de l'avoir essayé.", "postship is uninstalled. Thanks for trying it.")}`);
+  }
+  if (process.env.POSTSHIP_TOKEN) ecrire(peindre("yellow", t("POSTSHIP_TOKEN reste posé dans votre environnement : retirez-le, ou révoquez la clé dans Compte → API.", "POSTSHIP_TOKEN is still set in your environment: unset it, or revoke the key in Account → API.")));
+  surFin?.("uninstall");
+  return 0;
+}
+
 // ---- postship.mjs
 // PostShip — la CLI officielle. Un binaire qui parle à
 // https://postship.fr/api/v1 comme un humain parlerait à l'Aperçu.
@@ -1874,7 +2952,7 @@ async function completion(args) {
 // doit pas y ajouter un arbre de modules. Node 18+ (fetch natif).
 //
 //   postship login                      # connecte ce terminal au compte
-//   postship                            # le tableau de bord (dans un terminal)
+//   postship                            # la console interactive (dans un terminal)
 //   postship check exemple.fr           # vérifie, compte dans le quota
 //   git push && postship wait --head    # le verdict du commit qu'on pousse
 //
@@ -1882,6 +2960,8 @@ async function completion(args) {
 //   0  le site (ou la lecture) est bon, seuil atteint
 //   1  le site a un problème (fail, score sous le seuil, incidents ouverts avec --fail-if-open)
 //   2  l'outil n'a pas pu se prononcer (jeton, quota, réseau, usage, projet introuvable)
+
+
 
 
 
@@ -1913,37 +2993,7 @@ async function docs(args) {
   return ouvrirNavigateur(url) ? 0 : 0;
 }
 
-const FONCTIONS = { login, logout, status, check, projects, incidents, ship, ships, urls, wait, gate, watch, open, whoami, doctor, init, completion, docs };
-
-/**
- * Les commandes rangées par usage, pour l'aide générale (28 sept. 2026).
- * Chaque commande de ORDRE y figure une fois — le test le vérifie.
- */
-const GROUPES = [
-  { fr: "Au quotidien", en: "Day to day", commandes: ["status", "watch", "wait", "check", "incidents", "open"] },
-  { fr: "Projets et déploiements", en: "Projects and deploys", commandes: ["projects", "urls", "ship", "ships", "gate"] },
-  { fr: "Compte et outils", en: "Account and tools", commandes: ["login", "logout", "whoami", "init", "doctor", "completion", "docs"] },
-];
-
-/** L'accueil de `postship` tapé seul, avant toute connexion : par où commencer. */
-function accueil() {
-  const l = langue();
-  ecrire();
-  ecrire(`  ${marque(peindre("dim", l === "fr" ? "vos déploiements, vérifiés depuis le terminal" : "your deploys, checked from the terminal"))}`);
-  ecrire();
-  const lignes = [
-    [l === "fr" ? "Pour commencer" : "To start", "postship login", l === "fr" ? "connecte ce terminal à votre compte" : "connects this terminal to your account"],
-    [l === "fr" ? "Ensuite" : "Then", "postship", l === "fr" ? "le tableau de bord de vos projets" : "your projects' dashboard"],
-    ["", "postship watch --notify", l === "fr" ? "les incidents en direct, notifiés" : "incidents live, with notifications"],
-    ["", "git push && postship wait --head", l === "fr" ? "le verdict du commit poussé" : "the pushed commit's verdict"],
-  ];
-  const c1 = Math.max(...lignes.map((x) => x[0].length));
-  const c2 = Math.max(...lignes.map((x) => x[1].length));
-  for (const [a, b, c] of lignes) ecrire(`  ${peindre("dim", a.padEnd(c1))}   ${peindre("bold", b.padEnd(c2))}   ${peindre("dim", c)}`);
-  ecrire();
-  ecrire(peindre("dim", l === "fr" ? "  postship help — toutes les commandes · postship docs — la documentation" : "  postship help — every command · postship docs — the documentation"));
-  ecrire();
-}
+const FONCTIONS = { login, logout, status, check, projects, incidents, ship, ships, urls, wait, gate, watch, open, whoami, doctor, init, update, uninstall, completion, docs };
 
 /** L'aide générale, ou celle d'une commande : description, options, exemples, codes de sortie, dépannage. */
 function aide(commande) {
@@ -1990,6 +3040,7 @@ function aide(commande) {
   ecrire();
   ecrire(`  ${marque(peindre("dim", `${VERSION.startsWith("__") ? "dev" : VERSION} · ${l === "fr" ? "vos déploiements, vérifiés depuis le terminal" : "your deploys, checked from the terminal"}`))}`);
   ecrire();
+  ecrire(l === "fr" ? "  postship               la console interactive (dans un terminal)" : "  postship               the interactive console (in a terminal)");
   ecrire(l === "fr" ? "  postship <commande> [options]" : "  postship <command> [options]");
   for (const groupe of GROUPES) {
     ecrire();
@@ -2030,15 +3081,17 @@ async function main(argv = process.argv.slice(2)) {
     ecrire(VERSION.startsWith("__") ? "dev" : VERSION);
     return 0;
   }
-  // `postship` seul, dans un terminal : le tableau de bord, ou l'accueil
-  // quand aucune clé n'est posée. Hors terminal (script, CI), l'aide et
-  // le code 2, comme avant : un appel sans commande y est une erreur.
-  if (!commande && process.stdout.isTTY && args.help !== true) {
-    if (!lireJeton()) {
-      accueil();
-      return 0;
-    }
-    return main(["status", ...argv]);
+  // `postship` seul, dans un terminal : la console interactive. Hors
+  // terminal (script, tube, CI), l'aide et le code 2, comme avant : un
+  // appel sans commande y est une erreur.
+  if (!commande && process.stdout.isTTY && process.stdin.isTTY && process.env.CI !== "true" && args.help !== true) {
+    return lancerConsole({
+      ...FONCTIONS,
+      help: async (a) => {
+        aide(a._[1]);
+        return 0;
+      },
+    });
   }
   if (!commande || commande === "help" || commande === "--help") {
     aide(args._[1]);
@@ -2071,7 +3124,7 @@ async function main(argv = process.argv.slice(2)) {
       code = 2;
     }
   }
-  if (commande !== "completion" && commande !== "docs") await avisDeVersion({ json: args.json === true });
+  if (!["completion", "docs", "update", "uninstall"].includes(commande)) await avisDeVersion({ json: args.json === true });
   return code;
 }
 
