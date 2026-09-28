@@ -3,7 +3,7 @@
 // Ne pas éditer : la source est src/cli/. Node 18+, aucune dépendance.
 import { pathToFileURL } from "node:url";
 import { readFileSync, mkdirSync, writeFileSync, chmodSync, readdirSync, realpathSync, rmdirSync, rmSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir, release, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, execFileSync, spawnSync } from "node:child_process";
@@ -15,7 +15,7 @@ import { spawn, execFileSync, spawnSync } from "node:child_process";
 // Chaque commande : ce qu'elle fait, ses options expliquées une à une,
 // deux exemples au moins, ce que le code de sortie veut dire, et ce
 // qu'on vérifie quand ça ne marche pas.
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 
 /** @typedef {{ fr: string, en: string }} T */
 
@@ -33,17 +33,19 @@ const COMMANDES = {
   login: {
     resume: { fr: "Connecte la CLI à votre compte, depuis le navigateur.", en: "Connect the CLI to your account, from the browser." },
     quota: false,
-    usage: "postship login [--machine <nom>] [--no-browser]",
+    usage: "postship login [--machine <nom>] [--no-browser] [--qr]",
     description: {
-      fr: "Affiche un code de huit caractères et ouvre postship.fr/cli/autoriser. Vous vous connectez (ou vous l'êtes déjà), vous comparez le code à celui du terminal, vous autorisez. La CLI reçoit une clé d'API à votre nom — « CLI · <machine> », visible et révocable dans Compte → API, qui expire après 90 jours sans usage — et l'écrit dans ~/.config/postship/config.json (mode 0600). Dix minutes pour tout faire ; le code ne sert qu'une fois.",
-      en: "Shows an eight-character code and opens postship.fr/cli/autoriser. You sign in (or already are), compare the code with the terminal's, and authorize. The CLI receives an API key in your name — “CLI · <machine>”, visible and revocable in Account → API, expiring after 90 days without use — and writes it to ~/.config/postship/config.json (mode 0600). Ten minutes to do it all; the code is single-use.",
+      fr: "Affiche un code de huit caractères et ouvre postship.fr/cli/autoriser. Vous vous connectez (ou vous l'êtes déjà), vous comparez le code à celui du terminal, vous autorisez. La CLI reçoit une clé d'API à votre nom — « CLI · <machine> », visible et révocable dans Compte → API, qui expire après 90 jours sans usage — et l'écrit dans ~/.config/postship/config.json (mode 0600). Dix minutes pour tout faire ; le code ne sert qu'une fois. Avec --qr, l'adresse s'affiche aussi en QR code, à scanner avec le téléphone. Dans l'interface (postship tapé seul), quatre façons de se connecter : le navigateur, un QR code, votre email et un code, ou une clé d'API collée.",
+      en: "Shows an eight-character code and opens postship.fr/cli/autoriser. You sign in (or already are), compare the code with the terminal's, and authorize. The CLI receives an API key in your name — “CLI · <machine>”, visible and revocable in Account → API, expiring after 90 days without use — and writes it to ~/.config/postship/config.json (mode 0600). Ten minutes to do it all; the code is single-use. With --qr, the address also shows as a QR code, to scan with your phone. In the interface (postship typed alone), four ways to sign in: the browser, a QR code, your email and a code, or a pasted API key.",
     },
     options: [
       { nom: "--machine", valeur: "<nom>", texte: { fr: "Le nom de cet appareil dans Compte → API (par défaut : le nom de la machine).", en: "This device's name in Account → API (default: the machine's hostname)." } },
       { nom: "--no-browser", texte: { fr: "N'ouvre pas le navigateur : affiche seulement l'adresse et le code, pour une machine distante.", en: "Do not open the browser: only print the address and the code, for a remote machine." } },
+      { nom: "--qr", texte: { fr: "Affiche l'adresse en QR code, à scanner avec le téléphone (le navigateur ne s'ouvre pas).", en: "Show the address as a QR code, to scan with your phone (the browser does not open)." } },
     ],
     exemples: [
       { cmd: "postship login", texte: { fr: "Sur votre poste : le navigateur s'ouvre, vous autorisez, c'est fini.", en: "On your computer: the browser opens, you authorize, done." } },
+      { cmd: "postship login --qr", texte: { fr: "En SSH ou sans navigateur : scannez, autorisez depuis le téléphone.", en: "Over SSH or without a browser: scan, authorize from your phone." } },
       { cmd: "postship login --no-browser --machine \"serveur de build\"", texte: { fr: "Sur un serveur en SSH : copiez l'adresse dans un navigateur ailleurs.", en: "On a server over SSH: paste the address into a browser elsewhere." } },
     ],
     sortie: { fr: "0 clé reçue et écrite · 2 refusé, expiré (dix minutes), ou PostShip injoignable.", en: "0 key received and written · 2 refused, expired (ten minutes), or PostShip unreachable." },
@@ -225,7 +227,7 @@ const COMMANDES = {
     resume: { fr: "Le compte, les projets, les incidents ouverts et le dernier ship en un écran.", en: "Account, projects, open incidents and last ship on one screen." },
     quota: false,
     usage: "postship status [--project <id>] [--json]",
-    description: { fr: "Le tableau de bord, d'un coup, puis la main rend au shell — tapé seul, postship ouvre la console interactive, qui suit la même chose en direct. Qui parle (plan, quota, clé), chaque projet avec son état et le nombre d'incidents ouverts, et pour le projet courant — celui de ./.postship.json ou de --project — les incidents ouverts et le dernier déploiement de production.", en: "The dashboard, at once, then back to the shell — typed alone, postship opens the interactive console, which follows the same things live. Who is speaking (plan, quota, key), each project with its state and number of open incidents, and for the current project — the one in ./.postship.json or --project — open incidents and the last production deploy." },
+    description: { fr: "Le tableau de bord, d'un coup, puis la main rend au shell — tapé seul, postship ouvre l'interface plein écran, qui suit la même chose en direct. Qui parle (plan, quota, clé), chaque projet avec son état et le nombre d'incidents ouverts, et pour le projet courant — celui de ./.postship.json ou de --project — les incidents ouverts et le dernier déploiement de production.", en: "The dashboard, at once, then back to the shell — typed alone, postship opens the full-screen interface, which follows the same things live. Who is speaking (plan, quota, key), each project with its state and number of open incidents, and for the current project — the one in ./.postship.json or --project — open incidents and the last production deploy." },
     options: [
       { nom: "--project, -p", valeur: "<id>", texte: { fr: "Le projet à détailler.", en: "The project to detail." } },
       { nom: "--json", texte: { fr: "Tout, brut.", en: "Everything, raw." } },
@@ -293,8 +295,8 @@ const COMMANDES = {
     quota: false,
     usage: "postship update [--check]",
     description: {
-      fr: "Lit la dernière version publiée sur npm et, si elle est plus récente, la réinstalle avec le gestionnaire qui a installé la CLI — npm i -g postship@latest, ou son équivalent pnpm, yarn ou bun. La connexion est gardée : la clé reste dans ~/.config/postship. Une CLI lancée par npx, depuis la source ou dans l'action GitHub n'est pas touchée : la commande dit quoi faire. Dans la console, la mise à jour faite, on relance postship.",
-      en: "Reads the latest version published on npm and, when it is newer, reinstalls it with the package manager that installed the CLI — npm i -g postship@latest, or its pnpm, yarn or bun equivalent. You stay signed in: the key stays in ~/.config/postship. A CLI run through npx, from source or in the GitHub action is left alone: the command says what to do. In the console, once updated, run postship again.",
+      fr: "Lit la dernière version publiée sur npm et, si elle est plus récente, la réinstalle avec le gestionnaire qui a installé la CLI — npm i -g postship@latest, ou son équivalent pnpm, yarn ou bun. La connexion est gardée : la clé reste dans ~/.config/postship. Une CLI lancée par npx, depuis la source ou dans l'action GitHub n'est pas touchée : la commande dit quoi faire. Depuis l'interface (/update), elle se ferme, la mise à jour se fait, puis on relance postship.",
+      en: "Reads the latest version published on npm and, when it is newer, reinstalls it with the package manager that installed the CLI — npm i -g postship@latest, or its pnpm, yarn or bun equivalent. You stay signed in: the key stays in ~/.config/postship. A CLI run through npx, from source or in the GitHub action is left alone: the command says what to do. From the interface (/update), it closes, the update runs, then run postship again.",
     },
     options: [{ nom: "--check", texte: { fr: "Dit seulement si une version plus récente existe, sans rien installer.", en: "Only says whether a newer version exists, without installing anything." } }],
     exemples: [
@@ -309,8 +311,8 @@ const COMMANDES = {
     quota: false,
     usage: "postship uninstall [--yes]",
     description: {
-      fr: "Trois gestes, dans l'ordre : la clé de ce terminal est révoquée chez PostShip (comme postship logout), ~/.config/postship est effacé (clé, historique de la console, cache de version), puis le paquet est retiré avec le gestionnaire qui l'a installé. Une confirmation est demandée dans un terminal ; --yes pour un script. Les fichiers ./.postship.json de vos dépôts et une clé posée dans POSTSHIP_TOKEN ne sont pas touchés.",
-      en: "Three steps, in order: this terminal's key is revoked on PostShip (like postship logout), ~/.config/postship is deleted (key, console history, version cache), then the package is removed with the package manager that installed it. A confirmation is asked in a terminal; --yes for a script. The ./.postship.json files in your repositories and a key set in POSTSHIP_TOKEN are left alone.",
+      fr: "Trois gestes, dans l'ordre : la clé de ce terminal est révoquée chez PostShip (comme postship logout), ~/.config/postship est effacé (clé, réglages et historique de l'interface, cache de version), puis le paquet est retiré avec le gestionnaire qui l'a installé. Une confirmation est demandée dans un terminal ; --yes pour un script. Les fichiers ./.postship.json de vos dépôts et une clé posée dans POSTSHIP_TOKEN ne sont pas touchés.",
+      en: "Three steps, in order: this terminal's key is revoked on PostShip (like postship logout), ~/.config/postship is deleted (key, interface settings and history, version cache), then the package is removed with the package manager that installed it. A confirmation is asked in a terminal; --yes for a script. The ./.postship.json files in your repositories and a key set in POSTSHIP_TOKEN are left alone.",
     },
     options: [{ nom: "--yes", texte: { fr: "Sans confirmation (obligatoire hors d'un terminal).", en: "Without confirmation (required outside a terminal)." } }],
     exemples: [
@@ -507,13 +509,30 @@ function t(fr, en, ...valeurs) {
 // comme dans l'app. Sans terminal (CI, tube, --json), tout redevient du
 // texte brut : ce qu'un script lit ne change pas.
 
+
 const ESC = "\x1b";
 const CODES = { reset: `${ESC}[0m`, dim: `${ESC}[2m`, red: `${ESC}[31m`, green: `${ESC}[32m`, yellow: `${ESC}[33m`, bold: `${ESC}[1m`, blue: `${ESC}[34m` };
 
-// Les teintes de l'app en thème sombre (globals.css) : signal, ok, warn,
-// danger. En 24 bits quand le terminal le dit, en 256 couleurs sinon.
-const TEINTES_24 = { signal: [143, 176, 220], green: [74, 158, 112], yellow: [196, 164, 64], red: [217, 99, 90] };
-const TEINTES_256 = { signal: 110, green: 72, yellow: 178, red: 167 };
+// Les teintes de l'app (globals.css) : signal, ok, warn, danger — celles
+// du thème sombre sur un terminal sombre, celles du thème clair sur un
+// terminal clair (le bleu pâle du sombre ne se lit pas sur du blanc).
+// En 24 bits quand le terminal le dit, en 256 couleurs sinon. `fond` et
+// `choix` : le fond d'une ligne choisie dans l'interface plein écran.
+const PALETTES = {
+  sombre: { signal: [143, 176, 220], green: [74, 158, 112], yellow: [196, 164, 64], red: [217, 99, 90], choix: [32, 42, 56], trait: [58, 58, 58] },
+  clair: { signal: [47, 95, 158], green: [42, 122, 75], yellow: [138, 106, 16], red: [179, 54, 47], choix: [227, 236, 247], trait: [212, 212, 212] },
+  // Quand le terminal ne dit pas sa couleur de fond : des teintes moyennes,
+  // lisibles sur les deux, et la ligne choisie en vidéo inverse.
+  neutre: { signal: [84, 126, 190], green: [52, 140, 92], yellow: [170, 132, 30], red: [200, 76, 68], trait: [128, 128, 128] },
+};
+const TEINTES_256 = { signal: 110, green: 72, yellow: 178, red: 167, choix: 236, trait: 238 };
+const TEINTES_256_CLAIR = { signal: 25, green: 28, yellow: 136, red: 124, choix: 254, trait: 252 };
+let theme = "sombre";
+
+/** Le thème du terminal : « sombre » (par défaut), « clair », ou « neutre » quand on ne sait pas. */
+function definirTheme(t) {
+  theme = t === "clair" || t === "neutre" ? t : "sombre";
+}
 
 function couleursActives() {
   if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== "") return false;
@@ -524,15 +543,28 @@ function couleursActives() {
 function profondeur() {
   const ct = String(process.env.COLORTERM ?? "").toLowerCase();
   if (ct === "truecolor" || ct === "24bit" || process.env.WT_SESSION || process.env.TERM_PROGRAM === "vscode" || process.env.TERM_PROGRAM === "iTerm.app") return 24;
+  // Windows 10 1809 et plus comprend les couleurs 24 bits, Windows Terminal aussi.
+  if (process.platform === "win32" && Number(String(release()).split(".")[2] ?? 0) >= 17763) return 24;
   if (String(process.env.TERM ?? "").includes("256")) return 8;
   return 4;
 }
 
-function codeCouleur(couleur) {
+function codeCouleur(couleur, plan = 38) {
   const p = profondeur();
-  if (p === 24 && TEINTES_24[couleur]) return `${ESC}[38;2;${TEINTES_24[couleur].join(";")}m`;
-  if (p === 8 && TEINTES_256[couleur]) return `${ESC}[38;5;${TEINTES_256[couleur]}m`;
-  return CODES[couleur === "signal" ? "blue" : couleur] ?? "";
+  const rgb = PALETTES[theme][couleur];
+  if (p === 24 && rgb) return `${ESC}[${plan};2;${rgb.join(";")}m`;
+  const t256 = (theme === "clair" ? TEINTES_256_CLAIR : TEINTES_256)[couleur];
+  if (p === 8 && t256) return `${ESC}[${plan};5;${t256}m`;
+  if (plan === 48) return couleur === "choix" ? `${ESC}[7m` : "";
+  return CODES[couleur === "signal" ? "blue" : couleur === "trait" ? "dim" : couleur] ?? "";
+}
+
+/** Un fond de couleur (la ligne choisie d'une liste), rien sans couleurs. */
+function surFond(couleur, texte) {
+  if (!couleursActives()) return texte;
+  // Le fond survit aux « reset » intérieurs : on le repose après chacun.
+  const code = codeCouleur(couleur, 48);
+  return `${code}${String(texte).replaceAll(CODES.reset, `${CODES.reset}${code}`)}${CODES.reset}`;
 }
 
 function peindre(couleur, texte) {
@@ -544,11 +576,18 @@ function peindre(couleur, texte) {
 /**
  * Le terminal sait-il dessiner ✓ et ⠋ ? Partout sauf l'ancienne console
  * de Windows et la console texte de Linux. POSTSHIP_ASCII=1 force l'ASCII.
+ *
+ * Windows 11 (build 22000 et plus) ouvre cmd et PowerShell dans Windows
+ * Terminal — sans toujours poser WT_SESSION quand le terminal est celui
+ * par défaut : on s'y fie au numéro de build (retour du 28 sept. 2026,
+ * une console en « +---+ » sur un Windows 11).
  */
 function unicode() {
   if (process.env.POSTSHIP_ASCII) return false;
   if (process.platform !== "win32") return process.env.TERM !== "linux";
-  return !!(process.env.WT_SESSION || process.env.TERM_PROGRAM || process.env.ConEmuTask || process.env.TERMINAL_EMULATOR || String(process.env.TERM ?? "").startsWith("xterm"));
+  if (process.env.WT_SESSION || process.env.TERM_PROGRAM || process.env.ConEmuTask || process.env.TERMINAL_EMULATOR || String(process.env.TERM ?? "").startsWith("xterm")) return true;
+  const build = Number(String(release()).split(".")[2] ?? 0);
+  return build >= 22000;
 }
 
 /**
@@ -868,116 +907,339 @@ function notifierBureau(titre, texte) {
   }
 }
 
-// ---- version.mjs
-// L'avis de nouvelle version : au plus une fois par jour, une ligne
-// discrète sur la sortie d'erreur — jamais de mise à jour automatique
-// (c'est `postship update` qui installe, quand on le demande).
-// Lu sur le registre npm, mémorisé à côté de la config. Muet en CI, sans
-// terminal, ou en --json : rien ne doit polluer une sortie qu'un script lit.
+// ---- navigateur.mjs
+// Ouvrir une adresse dans le navigateur, sans dépendance : `start` sur
+// Windows, `open` sur macOS, `xdg-open` ailleurs. Rend false quand rien
+// n'a pu être lancé (serveur, conteneur) : l'appelant affiche l'adresse.
+// POSTSHIP_NO_BROWSER=1 : n'ouvre jamais rien (scripts, tests, SSH).
 
 
-
-
-
-const UN_JOUR = 86_400_000;
-
-function cheminCacheVersion() {
-  return join(dirname(cheminConfig()), "version-check.json");
+function ouvrirNavigateur(url) {
+  if (process.env.POSTSHIP_NO_BROWSER) return false;
+  try {
+    const p =
+      process.platform === "win32"
+        ? spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true, windowsHide: true })
+        : process.platform === "darwin"
+          ? spawn("open", [url], { stdio: "ignore", detached: true })
+          : spawn("xdg-open", [url], { stdio: "ignore", detached: true });
+    p.on("error", () => {});
+    p.unref();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-/** a < b, sur « x.y.z » ; false si l'une n'est pas une version. */
-function plusRecente(a, b) {
-  const pa = String(a).split(".").map(Number);
-  const pb = String(b).split(".").map(Number);
-  if (pa.some(Number.isNaN) || pb.some(Number.isNaN) || pa.length < 3 || pb.length < 3) return false;
-  for (let i = 0; i < 3; i++) {
-    if (pb[i] > pa[i]) return true;
-    if (pb[i] < pa[i]) return false;
+/** « MacBook-de-Camille » → « MacBook de Camille » ; le nom de la machine, lisible. */
+function nomMachine() {
+  return hostname().replace(/\.local$/i, "").replace(/[-_]+/g, " ").trim().slice(0, 80) || "cette machine";
+}
+
+// ---- qr.mjs
+// Un QR code sans dépendance (28 sept. 2026), pour se connecter depuis le
+// téléphone : la CLI dessine l'adresse d'autorisation, on la scanne, on
+// autorise. Mode octet, correction d'erreur M (15 %), versions 1 à 10 —
+// assez pour une adresse de 200 caractères. L'algorithme suit la norme
+// ISO/IEC 18004, dans l'ordre où la décrit l'implémentation de référence
+// de Project Nayuki (MIT) : motifs fixes, données et Reed-Solomon,
+// placement en zigzag, puis le masque au plus faible score de pénalité.
+
+// Correction M : octets de correction par bloc, et nombre de blocs, versions 1 à 10.
+const CORRECTION_PAR_BLOC_M = [0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26];
+const BLOCS_M = [0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5];
+const FORMAT_M = 0; // L=1, M=0, Q=3, H=2
+
+function modulesDeDonnees(version) {
+  let n = (16 * version + 128) * version + 64;
+  if (version >= 2) {
+    const alignements = Math.floor(version / 7) + 2;
+    n -= (25 * alignements - 10) * alignements - 55;
+    if (version >= 7) n -= 36;
   }
-  return false;
+  return n;
+}
+
+function octetsDeDonnees(version) {
+  return Math.floor(modulesDeDonnees(version) / 8) - CORRECTION_PAR_BLOC_M[version] * BLOCS_M[version];
+}
+
+// Le corps de Galois GF(256), polynôme 0x11D.
+function multiplierGf(x, y) {
+  let z = 0;
+  for (let i = 7; i >= 0; i--) {
+    z = (z << 1) ^ ((z >>> 7) * 0x11d);
+    z ^= ((y >>> i) & 1) * x;
+  }
+  return z & 0xff;
+}
+
+function diviseurRs(degre) {
+  const r = new Array(degre - 1).fill(0).concat([1]);
+  let racine = 1;
+  for (let i = 0; i < degre; i++) {
+    for (let j = 0; j < r.length; j++) {
+      r[j] = multiplierGf(r[j], racine);
+      if (j + 1 < r.length) r[j] ^= r[j + 1];
+    }
+    racine = multiplierGf(racine, 0x02);
+  }
+  return r;
+}
+
+function resteRs(donnees, diviseur) {
+  const r = diviseur.map(() => 0);
+  for (const b of donnees) {
+    const facteur = b ^ r.shift();
+    r.push(0);
+    diviseur.forEach((c, i) => (r[i] ^= multiplierGf(c, facteur)));
+  }
+  return r;
+}
+
+function positionsAlignement(version, taille) {
+  if (version === 1) return [];
+  const n = Math.floor(version / 7) + 2;
+  const pas = Math.ceil((version * 4 + 4) / (n * 2 - 2)) * 2;
+  const r = [6];
+  for (let pos = taille - 7; r.length < n; pos -= pas) r.splice(1, 0, pos);
+  return r;
+}
+
+/** La matrice d'un texte : un tableau de lignes de booléens (true = module sombre). */
+function matriceQr(texte) {
+  const octets = [...new TextEncoder().encode(String(texte))];
+  let version = 1;
+  for (; version <= 10; version++) {
+    const bitsCompte = version <= 9 ? 8 : 16;
+    if (4 + bitsCompte + octets.length * 8 <= octetsDeDonnees(version) * 8) break;
+  }
+  if (version > 10) throw new Error("Texte trop long pour un QR code de version 10.");
+  const taille = version * 4 + 17;
+
+  // Les bits de données : mode octet, longueur, octets, terminaison, bourrage.
+  const bits = [];
+  const pousser = (valeur, n) => {
+    for (let i = n - 1; i >= 0; i--) bits.push((valeur >>> i) & 1);
+  };
+  pousser(0b0100, 4);
+  pousser(octets.length, version <= 9 ? 8 : 16);
+  for (const o of octets) pousser(o, 8);
+  const capacite = octetsDeDonnees(version) * 8;
+  pousser(0, Math.min(4, capacite - bits.length));
+  pousser(0, (8 - (bits.length % 8)) % 8);
+  for (let bourrage = 0xec; bits.length < capacite; bourrage ^= 0xec ^ 0x11) pousser(bourrage, 8);
+  const donnees = [];
+  for (let i = 0; i < bits.length; i += 8) donnees.push(bits.slice(i, i + 8).reduce((a, b) => (a << 1) | b, 0));
+
+  // Les blocs, leur correction, l'entrelacement.
+  const nbBlocs = BLOCS_M[version];
+  const correction = CORRECTION_PAR_BLOC_M[version];
+  const bruts = Math.floor(modulesDeDonnees(version) / 8);
+  const courts = nbBlocs - (bruts % nbBlocs);
+  const longueurCourte = Math.floor(bruts / nbBlocs);
+  const diviseur = diviseurRs(correction);
+  const blocs = [];
+  for (let i = 0, k = 0; i < nbBlocs; i++) {
+    const d = donnees.slice(k, k + longueurCourte - correction + (i < courts ? 0 : 1));
+    k += d.length;
+    const ec = resteRs(d, diviseur);
+    if (i < courts) d.push(0);
+    blocs.push(d.concat(ec));
+  }
+  const mots = [];
+  for (let i = 0; i < blocs[0].length; i++) {
+    for (let j = 0; j < blocs.length; j++) if (i !== longueurCourte - correction || j >= courts) mots.push(blocs[j][i]);
+  }
+
+  // Les motifs fixes.
+  const modules = Array.from({ length: taille }, () => new Array(taille).fill(false));
+  const fixe = Array.from({ length: taille }, () => new Array(taille).fill(false));
+  const poser = (x, y, sombre) => {
+    modules[y][x] = sombre;
+    fixe[y][x] = true;
+  };
+  for (let i = 0; i < taille; i++) {
+    poser(6, i, i % 2 === 0);
+    poser(i, 6, i % 2 === 0);
+  }
+  for (const [cx, cy] of [
+    [3, 3],
+    [taille - 4, 3],
+    [3, taille - 4],
+  ]) {
+    for (let dy = -4; dy <= 4; dy++) {
+      for (let dx = -4; dx <= 4; dx++) {
+        const x = cx + dx;
+        const y = cy + dy;
+        const d = Math.max(Math.abs(dx), Math.abs(dy));
+        if (x >= 0 && x < taille && y >= 0 && y < taille) poser(x, y, d !== 2 && d !== 4);
+      }
+    }
+  }
+  const pos = positionsAlignement(version, taille);
+  for (let i = 0; i < pos.length; i++) {
+    for (let j = 0; j < pos.length; j++) {
+      if ((i === 0 && j === 0) || (i === 0 && j === pos.length - 1) || (i === pos.length - 1 && j === 0)) continue;
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) poser(pos[i] + dx, pos[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+    }
+  }
+  const poserFormat = (masque) => {
+    const d = (FORMAT_M << 3) | masque;
+    let reste = d;
+    for (let i = 0; i < 10; i++) reste = (reste << 1) ^ ((reste >>> 9) * 0x537);
+    const f = ((d << 10) | reste) ^ 0x5412;
+    const bit = (i) => ((f >>> i) & 1) !== 0;
+    for (let i = 0; i <= 5; i++) poser(8, i, bit(i));
+    poser(8, 7, bit(6));
+    poser(8, 8, bit(7));
+    poser(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) poser(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) poser(taille - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) poser(8, taille - 15 + i, bit(i));
+    poser(8, taille - 8, true);
+  };
+  poserFormat(0);
+  if (version >= 7) {
+    let reste = version;
+    for (let i = 0; i < 12; i++) reste = (reste << 1) ^ ((reste >>> 11) * 0x1f25);
+    const v = (version << 12) | reste;
+    for (let i = 0; i < 18; i++) {
+      const sombre = ((v >>> i) & 1) !== 0;
+      const a = taille - 11 + (i % 3);
+      const b = Math.floor(i / 3);
+      poser(a, b, sombre);
+      poser(b, a, sombre);
+    }
+  }
+
+  // Les données, en zigzag de deux colonnes, de bas en haut puis de haut en bas.
+  let i = 0;
+  for (let droite = taille - 1; droite >= 1; droite -= 2) {
+    if (droite === 6) droite = 5;
+    for (let v = 0; v < taille; v++) {
+      for (let j = 0; j < 2; j++) {
+        const x = droite - j;
+        const montant = ((droite + 1) & 2) === 0;
+        const y = montant ? taille - 1 - v : v;
+        if (!fixe[y][x] && i < mots.length * 8) {
+          modules[y][x] = ((mots[i >>> 3] >>> (7 - (i & 7))) & 1) !== 0;
+          i++;
+        }
+      }
+    }
+  }
+
+  // Le masque : les huit sont essayés, le plus lisible gagne.
+  const MASQUES = [
+    (x, y) => (x + y) % 2 === 0,
+    (x, y) => y % 2 === 0,
+    (x) => x % 3 === 0,
+    (x, y) => (x + y) % 3 === 0,
+    (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0,
+    (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0,
+    (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0,
+    (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0,
+  ];
+  const appliquer = (m) => {
+    for (let y = 0; y < taille; y++) for (let x = 0; x < taille; x++) if (!fixe[y][x] && MASQUES[m](x, y)) modules[y][x] = !modules[y][x];
+  };
+  let meilleur = 0;
+  let score = Infinity;
+  for (let m = 0; m < 8; m++) {
+    appliquer(m);
+    poserFormat(m);
+    const s = penalite(modules);
+    if (s < score) {
+      score = s;
+      meilleur = m;
+    }
+    appliquer(m);
+  }
+  appliquer(meilleur);
+  poserFormat(meilleur);
+  return modules;
+}
+
+/** Le score de pénalité de la norme : séries, carrés, faux repères, équilibre. */
+function penalite(m) {
+  const n = m.length;
+  let s = 0;
+  const lignes = [];
+  for (let y = 0; y < n; y++) lignes.push(m[y]);
+  for (let x = 0; x < n; x++) lignes.push(m.map((l) => l[x]));
+  for (const l of lignes) {
+    let serie = 1;
+    for (let i = 1; i <= n; i++) {
+      if (i < n && l[i] === l[i - 1]) serie++;
+      else {
+        if (serie >= 5) s += serie - 2;
+        serie = 1;
+      }
+    }
+    const texte = `0000${l.map((b) => (b ? "1" : "0")).join("")}0000`;
+    for (const motif of ["00001011101", "10111010000"]) {
+      for (let k = texte.indexOf(motif); k !== -1; k = texte.indexOf(motif, k + 1)) s += 40;
+    }
+  }
+  for (let y = 0; y < n - 1; y++) for (let x = 0; x < n - 1; x++) if (m[y][x] === m[y][x + 1] && m[y][x] === m[y + 1][x] && m[y][x] === m[y + 1][x + 1]) s += 3;
+  const sombres = m.reduce((a, l) => a + l.filter(Boolean).length, 0);
+  const total = n * n;
+  s += (Math.ceil(Math.abs(sombres * 20 - total * 10) / total) - 1) * 10;
+  return s;
 }
 
 /**
- * La dernière version publiée sur npm : celle du cache si elle a moins
- * d'un jour, sinon celle du registre. `forcer` interroge toujours le
- * registre (postship update) et rend null s'il ne répond pas.
+ * Le QR en demi-blocs (▀ ▄ █), deux rangées de modules par ligne, avec sa
+ * marge. Noir sur blanc forcé, quel que soit le thème du terminal : un
+ * lecteur de QR code veut du contraste, pas nos couleurs.
  */
-async function versionPubliee({ forcer = false, delaiMs = 1500 } = {}) {
-  let cache = {};
-  try {
-    cache = JSON.parse(readFileSync(cheminCacheVersion(), "utf8"));
-  } catch {
-    // premier passage
+function dessinerQr(texte, { marge = 2, couleurs = true, profondeur = 24 } = {}) {
+  const m = matriceQr(texte);
+  const n = m.length + marge * 2;
+  const sombre = (x, y) => {
+    const xx = x - marge;
+    const yy = y - marge;
+    return yy >= 0 && yy < m.length && xx >= 0 && xx < m.length && m[yy][xx];
+  };
+  const debut = !couleurs ? "" : profondeur === 24 ? "\x1b[38;2;0;0;0;48;2;255;255;255m" : "\x1b[30;107m";
+  const fin = couleurs ? "\x1b[0m" : "";
+  const lignes = [];
+  for (let y = 0; y < n; y += 2) {
+    let l = "";
+    for (let x = 0; x < n; x++) {
+      const haut = sombre(x, y);
+      const bas = y + 1 < n && sombre(x, y + 1);
+      l += haut && bas ? "█" : haut ? "▀" : bas ? "▄" : " ";
+    }
+    lignes.push(`${debut}${l}${fin}`);
   }
-  if (!forcer && cache.verifieLe && Date.now() - new Date(cache.verifieLe).getTime() <= UN_JOUR) return cache.derniere ?? null;
-  let derniere = null;
-  try {
-    const controleur = new AbortController();
-    const minuterie = setTimeout(() => controleur.abort(), delaiMs);
-    const r = await fetch("https://registry.npmjs.org/postship/latest", { signal: controleur.signal, headers: { Accept: "application/json" } });
-    clearTimeout(minuterie);
-    if (r.ok) derniere = (await r.json()).version ?? null;
-  } catch {
-    // le registre ne répond pas : on retentera plus tard
-  }
-  try {
-    mkdirSync(dirname(cheminCacheVersion()), { recursive: true });
-    writeFileSync(cheminCacheVersion(), JSON.stringify({ verifieLe: new Date().toISOString(), derniere: derniere ?? cache.derniere ?? null }));
-  } catch {
-    // pas grave
-  }
-  return forcer ? derniere : (derniere ?? cache.derniere ?? null);
-}
-
-async function avisDeVersion({ json = false } = {}) {
-  if (json || process.env.CI === "true" || !process.stderr.isTTY || process.env.POSTSHIP_NO_UPDATE_NOTICE || VERSION.startsWith("__")) return;
-  const derniere = await versionPubliee();
-  if (derniere && plusRecente(VERSION, derniere)) {
-    console.error(peindre("dim", t("postship {0} est disponible (vous avez {1}) : postship update", "postship {0} is available (you have {1}): postship update", derniere, VERSION)));
-  }
+  return lignes;
 }
 
 // ---- console.mjs
-// La console : `postship` tapé seul dans un terminal (28 sept. 2026).
-//
-// Une invite encadrée en bas de l'écran, comme `claude` : on y tape les
-// commandes de la CLI (avec ou sans « / », avec ou sans « postship »),
-// « / » ouvre la liste des commandes avec leur description, Tab complète,
-// ↑ ↓ remontent l'historique. Sous l'invite, une ligne d'état vit toute
-// seule : plan, quota, projet de la session, incidents ouverts. Toutes les
-// 30 s, la console relit vos projets ; un incident qui s'ouvre ou se ferme
-// s'imprime au-dessus de l'invite, avec une sonnerie (et une notification
-// du bureau après /notifier). Ctrl+C ou Échap annule la commande en cours
-// sans quitter ; Ctrl+C deux fois, ou Ctrl+D, quitte.
-//
-// Sans dépendance, comme le reste : le mode brut de stdin, les séquences
-// ANSI, et une zone redessinée sous le curseur. Ce qui a été imprimé
-// au-dessus reste dans l'historique du terminal.
+// Les outils de saisie de l'interface plein écran (src/cli/interface.mjs) :
+// découper une ligne comme un shell, lire les touches du mode brut,
+// proposer les commandes derrière « / », retrouver un projet par son nom,
+// garder l'historique des commandes tapées.
 
 
 
 
 
-
-
-
-
-/** Les commandes propres à la console, en plus de celles de la CLI. */
+/** Les commandes propres à l'interface, en plus de celles de la CLI. */
 const SESSION_CONSOLE = {
-  projet: { fr: "Choisit le projet de la session ; « tous » pour revenir à tous.", en: "Choose the session's project; “all” to go back to every project." },
+  projet: { fr: "Choisit le projet affiché, par son nom.", en: "Choose the displayed project, by name." },
+  reglages: { fr: "Le projet par défaut et les notifications du bureau.", en: "Default project and desktop notifications." },
   notifier: { fr: "Notifications du bureau quand un incident s'ouvre ou se ferme (on/off).", en: "Desktop notifications when an incident opens or closes (on/off)." },
-  aide: { fr: "Les commandes et les raccourcis clavier.", en: "Commands and keyboard shortcuts." },
-  effacer: { fr: "Efface l'écran.", en: "Clear the screen." },
-  quitter: { fr: "Quitte la console (Ctrl+D).", en: "Quit the console (Ctrl+D)." },
+  theme: { fr: "Couleurs pour un terminal clair ou sombre (clair/sombre/auto).", en: "Colours for a light or dark terminal (clair/sombre/auto)." },
+  effacer: { fr: "Vide la vue Sortie.", en: "Clear the Output view." },
+  aide: { fr: "Les raccourcis et les commandes.", en: "Shortcuts and commands." },
+  quitter: { fr: "Quitte l'interface (q).", en: "Quit the interface (q)." },
 };
-const ALIAS_CONSOLE = { project: "projet", projects: "projects", notify: "notifier", help: "aide", "?": "aide", clear: "effacer", exit: "quitter", quit: "quitter", q: "quitter" };
-/** Ce qui n'a pas de sens dans la console : watch (la console suit déjà), completion (un script pour le shell). */
+const ALIAS_CONSOLE = { project: "projet", settings: "reglages", réglages: "reglages", notify: "notifier", help: "aide", "?": "aide", clear: "effacer", exit: "quitter", quit: "quitter", q: "quitter" };
+/** Ce qui n'a pas de sens dans l'interface : watch (elle suit déjà), completion (un script pour le shell). */
 const HORS_CONSOLE = new Set(["watch", "completion"]);
-/** Les commandes qui prennent le projet de la session quand on n'en donne pas. */
-const AVEC_PROJET = new Set(["status", "check", "incidents", "ship", "ships", "urls", "wait", "gate", "open"]);
-/** Les commandes qui lisent elles-mêmes le clavier : la console se tait pendant ce temps. */
-const AVEC_CLAVIER = new Set(["init", "uninstall"]);
-const PROJETS_SUIVIS_CONSOLE = 20;
 const HISTORIQUE_MAX = 500;
 
 /** « check "mon site.fr" --min-score 80 » → ["check", "mon site.fr", "--min-score", "80"]. */
@@ -1009,7 +1271,7 @@ function decouperLigne(ligne) {
   return sortie;
 }
 
-const SEQUENCES_TOUCHES = { "[A": "up", "[B": "down", "[C": "right", "[D": "left", OA: "up", OB: "down", OC: "right", OD: "left", "[H": "home", "[F": "end", OH: "home", OF: "end", "[1~": "home", "[4~": "end", "[7~": "home", "[8~": "end", "[3~": "delete" };
+const SEQUENCES_TOUCHES = { "[A": "up", "[B": "down", "[C": "right", "[D": "left", OA: "up", OB: "down", OC: "right", OD: "left", "[H": "home", "[F": "end", OH: "home", OF: "end", "[1~": "home", "[4~": "end", "[7~": "home", "[8~": "end", "[3~": "delete", "[5~": "pageup", "[6~": "pagedown", "[Z": "shift-tab" };
 
 /**
  * Les touches d'un morceau lu en mode brut. Un Échap seul arrive seul :
@@ -1091,7 +1353,7 @@ function trouverProjet(projets, requete) {
   );
 }
 
-/** Les entrées du menu « / » : les commandes de la CLI par groupe, puis celles de la console. */
+/** Les entrées du menu « / » : les commandes de la CLI par groupe, puis celles de l'interface. */
 function entreesConsole(l = langue()) {
   const liste = [];
   for (const g of GROUPES) for (const nom of g.commandes) if (!HORS_CONSOLE.has(nom)) liste.push({ nom, texte: COMMANDES[nom].resume[l], valeur: `/${nom}` });
@@ -1105,13 +1367,14 @@ function suggestionsConsole(saisie, options = {}) {
   const projet = saisie.match(/^\/?(?:projet|project)\s+(.*)$/i);
   if (projet) {
     const q = projet[1].toLowerCase();
-    const tous = { nom: t("tous", "all"), texte: t("revenir à tous les projets", "back to every project"), valeur: `/projet ${t("tous", "all")}` };
-    return [tous, ...projets.map((p) => ({ nom: p.name, texte: adresseCourte(p.url), valeur: `/projet ${p.name}` }))].filter((e) => e.nom.toLowerCase().includes(q));
+    return projets.map((p) => ({ nom: p.name, texte: adresseCourte(p.url), valeur: `/projet ${p.name}` })).filter((e) => e.nom.toLowerCase().includes(q));
   }
   const page = saisie.match(/^\/?open\s+(\S*)$/i);
   if (page) return PAGES_OPEN.filter((p) => p.startsWith(page[1].toLowerCase())).map((p) => ({ nom: p, texte: "", valeur: `/open ${p}` }));
-  if (/^\/\S*$/.test(saisie)) {
-    const q = saisie.slice(1).toLowerCase();
+  const theme = saisie.match(/^\/?theme\s+(\S*)$/i);
+  if (theme) return ["clair", "sombre", "auto"].filter((x) => x.startsWith(theme[1].toLowerCase())).map((x) => ({ nom: x, texte: "", valeur: `/theme ${x}` }));
+  if (/^\/?\S*$/.test(saisie)) {
+    const q = saisie.replace(/^\//, "").toLowerCase();
     return entreesConsole(l).filter((e) => e.nom.startsWith(q) || (q && Object.entries(ALIAS_CONSOLE).some(([a, cible]) => cible === e.nom && a.startsWith(q))));
   }
   return [];
@@ -1139,308 +1402,880 @@ function ecrireHistorique(lignes) {
   }
 }
 
-/**
- * Lance la console. `commandes` : les fonctions de la CLI (postship.mjs
- * les passe, pour éviter un import circulaire). Rend 0 en quittant.
- */
-function lancerConsole(commandes, { entree = process.stdin, sortie = process.stdout, intervalle = 30_000 } = {}) {
-  const l = langue();
-  const u = unicode();
-  const B = u ? { h: "─", v: "│", hg: "╭", hd: "╮", bg: "╰", bd: "╯" } : { h: "-", v: "|", hg: "+", hd: "+", bg: "+", bd: "+" };
-  const ecrireZone = sortie.write.bind(sortie);
+// ---- commands/login.mjs
+// `postship login` — connecter la CLI au compte, comme on connecte un
+// téléviseur : un code court à comparer, une page qui autorise, la clé
+// qui arrive. La clé s'écrit dans ~/.config/postship/config.json (0600),
+// jamais ailleurs.
 
-  const etat = {
+
+
+
+
+
+
+function lireConfig() {
+  try {
+    return JSON.parse(readFileSync(cheminConfig(), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function ecrireConfig(valeurs) {
+  const chemin = cheminConfig();
+  mkdirSync(dirname(chemin), { recursive: true });
+  writeFileSync(chemin, JSON.stringify(valeurs, null, 2) + "\n");
+  try {
+    chmodSync(chemin, 0o600);
+  } catch {
+    // Windows : pas de mode POSIX ; le dossier utilisateur fait office.
+  }
+  return chemin;
+}
+
+async function login(args, { dormir = (ms) => new Promise((r) => setTimeout(r, ms)), maintenant = () => Date.now() } = {}) {
+  const machine = typeof une(args.machine) === "string" ? une(args.machine) : nomMachine();
+  const r = await appel("POST", "/api/cli/autoriser/demander", { corps: { machine }, timeoutMs: 15_000 });
+  if (!r.ok || !r.payload?.device_code) {
+    throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
+  }
+  const { device_code: deviceCode, user_code: userCode, verification_url_complete: lienComplet, verification_url: lien, expires_in: expiresIn, interval } = r.payload;
+
+  ecrire();
+  ecrire(`  ${marque("login")}`);
+  ecrire();
+  const [libCode, libLien] = [t("Le code de ce terminal", "This terminal's code"), t("À ouvrir", "Open")];
+  const col = Math.max(libCode.length, libLien.length) + 3;
+  ecrire(`  ${libCode.padEnd(col)}${peindre("signal", peindre("bold", userCode))}`);
+  ecrire(`  ${libLien.padEnd(col)}${lienComplet ?? lien}`);
+  ecrire();
+  ecrire(peindre("dim", `  ${t("Vérifiez que le navigateur affiche le même code, puis « Autoriser ce terminal ».", "Check that the browser shows the same code, then “Authorize this terminal”.")}`));
+  ecrire();
+  // --qr : l'adresse en QR code, à scanner avec le téléphone (SSH, machine sans navigateur).
+  if (args.qr === true) {
+    if (couleursActives()) {
+      for (const ligne of dessinerQr(lienComplet ?? lien, { profondeur: profondeur() === 24 ? 24 : 4 })) ecrire(`  ${ligne}`);
+      ecrire();
+    } else ecrire(peindre("dim", `  ${t("QR code indisponible sans couleurs (NO_COLOR, tube) : ouvrez l'adresse.", "QR code unavailable without colours (NO_COLOR, pipe): open the address.")}`));
+  } else if (args["no-browser"] !== true && process.stdout.isTTY) {
+    if (!ouvrirNavigateur(lienComplet ?? lien)) ecrire(peindre("dim", `  ${t("Aucun navigateur ici : copiez l'adresse ailleurs.", "No browser here: copy the address elsewhere.")}`));
+  }
+  const attente = roue(t("En attente de l'autorisation dans le navigateur… (dix minutes au plus)", "Waiting for the authorization in the browser… (ten minutes at most)"));
+
+  const fin = maintenant() + (Number(expiresIn) || 600) * 1000;
+  const pas = Math.max(2, Number(interval) || 3) * 1000;
+  try {
+    for (;;) {
+      await dormir(pas);
+      const j = await appel("POST", "/api/cli/autoriser/jeton", { corps: { device_code: deviceCode }, timeoutMs: 15_000 });
+      if (j.ok && j.payload?.token) {
+        attente.fin();
+        const config = lireConfig();
+        const chemin = ecrireConfig({ ...config, token: j.payload.token, prefix: j.payload.prefix, machine, api: baseUrl(), connecteLe: new Date().toISOString() });
+        ecrire(`  ${symbole("pass")} ${peindre("bold", t("Terminal connecté", "Terminal connected"))}`);
+        ecrire(peindre("dim", `    ${t("clé {0}… · {1}", "key {0}… · {1}", j.payload.prefix, chemin)}`));
+        if (process.env.POSTSHIP_TOKEN) ecrire(peindre("yellow", `  ${t("POSTSHIP_TOKEN est posé dans l'environnement et passe devant ce fichier.", "POSTSHIP_TOKEN is set in the environment and takes precedence over this file.")}`));
+        ecrire();
+        const ensuite = t("Et maintenant", "What next");
+        ecrire(`  ${ensuite}   postship ${peindre("dim", t("— le tableau de bord", "— the dashboard"))}`);
+        ecrire(`  ${" ".repeat(ensuite.length)}   postship init ${peindre("dim", t("— lier ce dossier à un projet", "— link this folder to a project"))}`);
+        ecrire();
+        return 0;
+      }
+      if (j.status === 410) throw new ErreurCli(t("Le code a expiré (dix minutes). Relancez postship login.", "The code expired (ten minutes). Run postship login again."), 2);
+      if (j.status !== 428) throw new ErreurCli(j.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", j.status), 2);
+      if (maintenant() >= fin) throw new ErreurCli(t("Le code a expiré (dix minutes). Relancez postship login.", "The code expired (ten minutes). Run postship login again."), 2);
+    }
+  } finally {
+    attente.fin();
+  }
+}
+
+/** `postship logout` : révoque la clé de la config (pas celle de l'environnement), puis l'efface. */
+async function logout() {
+  const config = lireConfig();
+  if (!config.token) {
+    if (process.env.POSTSHIP_TOKEN) throw new ErreurCli(t("La clé vient de POSTSHIP_TOKEN, pas de la CLI : retirez la variable, ou révoquez la clé dans Compte → API.", "The key comes from POSTSHIP_TOKEN, not from the CLI: unset the variable, or revoke the key in Account → API."), 2);
+    throw new ErreurCli(t("Aucune clé enregistrée par la CLI.", "No key saved by the CLI."), 2);
+  }
+  let revoquee = true;
+  try {
+    // La clé de la config, explicitement : même si POSTSHIP_TOKEN est posé.
+    const r = await appel("POST", "/api/cli/deconnecter", { jeton: config.token, timeoutMs: 15_000 });
+    revoquee = r.ok || r.status === 401;
+  } catch {
+    revoquee = false;
+  }
+  const { token: _t, prefix: _p, machine: _m, connecteLe: _c, ...reste } = config;
+  void _t;
+  void _p;
+  void _m;
+  void _c;
+  ecrireConfig(reste);
+  if (!revoquee) throw new ErreurCli(t("Config locale effacée, mais PostShip est injoignable : révoquez la clé dans Compte → API.", "Local config cleared, but PostShip is unreachable: revoke the key in Account → API."), 2);
+  ecrire(`${symbole("pass")} ${t("Déconnecté : la clé est révoquée et retirée de {0}.", "Signed out: the key is revoked and removed from {0}.", cheminConfig())}`);
+  return 0;
+}
+
+/** Le jeton effectif, pour `status` : d'où il vient. */
+function origineJeton() {
+  if (process.env.POSTSHIP_TOKEN) return "env";
+  if (lireJeton()) return "config";
+  return null;
+}
+
+// ---- commands/lecture.mjs
+// Ce que les commandes de lecture partagent : le projet requis, la sortie
+// JSON, le verdict d'un ship. Aucune ne consomme le quota de vérifications.
+
+
+
+function projetRequis(args) {
+  const id = lireProjet(une(args.project));
+  if (!id) throw new ErreurCli(t("--project manquant (ou ./.postship.json, ou POSTSHIP_PROJECT).", "--project missing (or ./.postship.json, or POSTSHIP_PROJECT)."), 2);
+  return id;
+}
+
+function sortieJson(args, payload) {
+  if (args.json !== true) return false;
+  console.log(JSON.stringify(payload, null, 2));
+  return true;
+}
+
+function lireShip(payload) {
+  return payload?.lastShip ?? null;
+}
+
+/** 1 si le ship a échoué ou si son score est sous le seuil, 0 sinon. */
+function codeDuShip(dernier, minScore) {
+  if (dernier.outcome === "fail" || dernier.outcome === "error") return 1;
+  if (minScore !== null && typeof dernier.score === "number" && dernier.score < minScore) return 1;
+  return 0;
+}
+
+/** La ligne d'un ship : « dernier ship  vercel  a1b2c3d  il y a 2 h  ✓ pass  92 ━━━━━━━━━─ ». */
+function ligneShip(ship, libelle = t("dernier ship", "last ship")) {
+  return [
+    libelle ? peindre("dim", libelle) : "",
+    ship.provider ?? "—",
+    peindre("bold", String(ship.sha ?? "").slice(0, 7) || "—"),
+    relatif(ship.at),
+    verdict(ship.outcome).trim(),
+    ship.score !== null && ship.score !== undefined ? jauge(ship.score) : "",
+  ]
+    .filter(Boolean)
+    .join("  ");
+}
+
+// ---- methodes-connexion.mjs
+// Les quatre façons de connecter la CLI (28 sept. 2026), sans rien
+// imprimer : l'interface plein écran et `postship login` les affichent
+// chacune à leur manière.
+//   - navigateur et QR code : le flux d'appareil (un code court, une page
+//     qui autorise, la clé qui arrive) — le QR n'est que l'adresse dessinée ;
+//   - email + code : le même code qu'à la connexion web, tapé dans le terminal ;
+//   - clé d'API : une clé psk_… déjà créée dans Compte → API, vérifiée avant
+//     d'être enregistrée.
+
+
+const EXPIREE = () => t("Le code a expiré (dix minutes). Recommencez.", "The code expired (ten minutes). Start again.");
+
+/** Une demande d'autorisation : le code à comparer et l'adresse à ouvrir (ou à scanner). */
+async function demarrerAppareil(machine) {
+  const r = await appel("POST", "/api/cli/autoriser/demander", { corps: { machine }, timeoutMs: 15_000 });
+  if (!r.ok || !r.payload?.device_code) throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
+  const p = r.payload;
+  return { deviceCode: p.device_code, userCode: p.user_code, lien: p.verification_url, lienComplet: p.verification_url_complete ?? p.verification_url, expireDans: Number(p.expires_in) || 600, intervalle: Math.max(2, Number(p.interval) || 3) };
+}
+
+/** Attend l'approbation dans l'app ; rend { token, prefix }. `annule()` arrête l'attente. */
+async function attendreAppareil(demande, { dormir = (ms) => new Promise((r) => setTimeout(r, ms)), maintenant = () => Date.now(), annule = () => false } = {}) {
+  const fin = maintenant() + demande.expireDans * 1000;
+  for (;;) {
+    await dormir(demande.intervalle * 1000);
+    if (annule()) throw new ErreurCli(t("Annulé.", "Cancelled."), 2);
+    const j = await appel("POST", "/api/cli/autoriser/jeton", { corps: { device_code: demande.deviceCode }, timeoutMs: 15_000 });
+    if (j.ok && j.payload?.token) return { token: j.payload.token, prefix: j.payload.prefix };
+    if (j.status === 410) throw new ErreurCli(EXPIREE(), 2);
+    if (j.status !== 428) throw new ErreurCli(j.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", j.status), 2);
+    if (maintenant() >= fin) throw new ErreurCli(EXPIREE(), 2);
+  }
+}
+
+/** Demande un code pour une adresse ; rend { attente, dejaEnvoye }. */
+async function demanderCodeEmail(email, langue = "fr") {
+  const r = await appel("POST", "/api/cli/email/demander", { corps: { email, langue }, timeoutMs: 15_000 });
+  if (!r.ok) throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
+  return { attente: Number(r.payload?.attente) || 60, dejaEnvoye: r.payload?.dejaEnvoye === true };
+}
+
+/** Échange l'adresse et le code contre une clé ; rend { token, prefix }. */
+async function verifierCodeEmail(email, code, machine) {
+  const r = await appel("POST", "/api/cli/email/verifier", { corps: { email, code: String(code).replace(/\s+/g, ""), machine }, timeoutMs: 20_000 });
+  if (!r.ok || !r.payload?.token) throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
+  return { token: r.payload.token, prefix: r.payload.prefix };
+}
+
+/** Vérifie une clé collée : la forme, puis PostShip ; rend { token, prefix, plan }. */
+async function verifierCleApi(brute) {
+  const cle = String(brute).trim();
+  if (!/^psk_[A-Za-z0-9_-]{16,}$/.test(cle)) throw new ErreurCli(t("Ce n'est pas une clé PostShip : elle commence par psk_ (Compte → API).", "This is not a PostShip key: it starts with psk_ (Account → API)."), 2);
+  const r = await appel("GET", "/api/v1/me", { jeton: cle, timeoutMs: 15_000 });
+  if (r.status === 401) throw new ErreurCli(t("Clé refusée : révoquée, expirée ou mal copiée.", "Key refused: revoked, expired or miscopied."), 2);
+  if (!r.ok) throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
+  return { token: cle, prefix: r.payload?.token?.prefix ?? cle.slice(0, 10), plan: r.payload?.plan ?? null };
+}
+
+/** Écrit la clé dans la configuration (0600), à côté des réglages déjà là. */
+function enregistrerConnexion({ token, prefix, machine }) {
+  return ecrireConfig({ ...lireConfig(), token, prefix, machine, api: baseUrl(), connecteLe: new Date().toISOString() });
+}
+
+// ---- version.mjs
+// L'avis de nouvelle version : au plus une fois par jour, une ligne
+// discrète sur la sortie d'erreur — jamais de mise à jour automatique
+// (c'est `postship update` qui installe, quand on le demande).
+// Lu sur le registre npm, mémorisé à côté de la config. Muet en CI, sans
+// terminal, ou en --json : rien ne doit polluer une sortie qu'un script lit.
+
+
+
+
+
+const UN_JOUR = 86_400_000;
+
+function cheminCacheVersion() {
+  return join(dirname(cheminConfig()), "version-check.json");
+}
+
+/** a < b, sur « x.y.z » ; false si l'une n'est pas une version. */
+function plusRecente(a, b) {
+  const pa = String(a).split(".").map(Number);
+  const pb = String(b).split(".").map(Number);
+  if (pa.some(Number.isNaN) || pb.some(Number.isNaN) || pa.length < 3 || pb.length < 3) return false;
+  for (let i = 0; i < 3; i++) {
+    if (pb[i] > pa[i]) return true;
+    if (pb[i] < pa[i]) return false;
+  }
+  return false;
+}
+
+/**
+ * La dernière version publiée sur npm : celle du cache si elle a moins
+ * d'un jour, sinon celle du registre. `forcer` interroge toujours le
+ * registre (postship update) et rend null s'il ne répond pas.
+ */
+async function versionPubliee({ forcer = false, delaiMs = 1500 } = {}) {
+  let cache = {};
+  try {
+    cache = JSON.parse(readFileSync(cheminCacheVersion(), "utf8"));
+  } catch {
+    // premier passage
+  }
+  if (!forcer && cache.verifieLe && Date.now() - new Date(cache.verifieLe).getTime() <= UN_JOUR) return cache.derniere ?? null;
+  let derniere = null;
+  try {
+    const controleur = new AbortController();
+    const minuterie = setTimeout(() => controleur.abort(), delaiMs);
+    const r = await fetch("https://registry.npmjs.org/postship/latest", { signal: controleur.signal, headers: { Accept: "application/json" } });
+    clearTimeout(minuterie);
+    if (r.ok) derniere = (await r.json()).version ?? null;
+  } catch {
+    // le registre ne répond pas : on retentera plus tard
+  }
+  try {
+    mkdirSync(dirname(cheminCacheVersion()), { recursive: true });
+    writeFileSync(cheminCacheVersion(), JSON.stringify({ verifieLe: new Date().toISOString(), derniere: derniere ?? cache.derniere ?? null }));
+  } catch {
+    // pas grave
+  }
+  return forcer ? derniere : (derniere ?? cache.derniere ?? null);
+}
+
+async function avisDeVersion({ json = false } = {}) {
+  if (json || process.env.CI === "true" || !process.stderr.isTTY || process.env.POSTSHIP_NO_UPDATE_NOTICE || VERSION.startsWith("__")) return;
+  const derniere = await versionPubliee();
+  if (derniere && plusRecente(VERSION, derniere)) {
+    console.error(peindre("dim", t("postship {0} est disponible (vous avez {1}) : postship update", "postship {0} is available (you have {1}): postship update", derniere, VERSION)));
+  }
+}
+
+// ---- interface.mjs
+// L'interface plein écran : `postship` tapé seul dans un terminal
+// (28 sept. 2026, v1.4). Une fenêtre à elle — l'écran alternatif du
+// terminal, comme vim ou htop : ce qui était affiché avant revient intact
+// en quittant.
+//
+// Au premier lancement, un accueil guidé : comment se connecter
+// (navigateur, QR code, email + code, clé d'API), le projet par défaut,
+// les notifications du bureau. Ensuite, deux panneaux : les projets à
+// gauche, le projet choisi à droite (Aperçu, Incidents, Déploiements,
+// URLs, Sortie), une ligne de raccourcis en bas. On pilote au clavier —
+// c vérifie, w attend le ship, o ouvre, / tape une commande complète.
+// Toutes les 30 s, l'interface relit les projets ; un incident qui s'ouvre
+// ou se ferme passe dans la ligne du bas, avec une sonnerie.
+//
+// Sans dépendance : le mode brut de stdin, les séquences ANSI, et un
+// écran recomposé à chaque changement dont seules les lignes modifiées
+// sont réécrites.
+
+
+
+
+
+
+
+
+
+
+
+
+
+const VUES = [
+  { id: "apercu", fr: "Aperçu", en: "Overview" },
+  { id: "incidents", fr: "Incidents", en: "Incidents" },
+  { id: "ships", fr: "Déploiements", en: "Deploys" },
+  { id: "urls", fr: "URLs", en: "URLs" },
+  { id: "sortie", fr: "Sortie", en: "Output" },
+];
+const METHODES = [
+  { id: "navigateur", fr: "Avec le navigateur de cet ordinateur", en: "With this computer's browser" },
+  { id: "qr", fr: "Avec un QR code, depuis le téléphone", en: "With a QR code, from your phone" },
+  { id: "email", fr: "Avec mon email et un code", en: "With my email and a code" },
+  { id: "cle", fr: "Avec une clé d'API", en: "With an API key" },
+];
+/** Les commandes qui quittent l'interface pour s'exécuter dans le terminal : elles y lisent le clavier, ou remplacent la CLI. */
+const DANS_LE_TERMINAL = new Set(["update", "uninstall", "init", "watch", "completion"]);
+const AVEC_PROJET_INTERFACE = new Set(["status", "check", "incidents", "ship", "ships", "urls", "wait", "gate", "open"]);
+const PROJETS_SUIVIS_INTERFACE = 20;
+const LARGEUR_MIN = 50;
+const HAUTEUR_MIN = 14;
+
+/**
+ * La couleur de fond du terminal, demandée par OSC 11 (xterm, Windows
+ * Terminal, iTerm, VS Code…) : « clair », « sombre », ou null s'il ne
+ * répond pas dans le délai.
+ */
+function detecterTheme(entree, ecrire, delaiMs = 250) {
+  return new Promise((resolve) => {
+    let tampon = "";
+    const finir = (valeur) => {
+      clearTimeout(minuterie);
+      entree.off("data", surDonnees);
+      resolve(valeur);
+    };
+    const surDonnees = (d) => {
+      tampon += String(d);
+      const m = tampon.match(/\]11;rgba?:([0-9a-f]+)\/([0-9a-f]+)\/([0-9a-f]+)/i);
+      if (!m) return;
+      const [r, g, b] = [m[1], m[2], m[3]].map((h) => parseInt(h.slice(0, 2), 16));
+      finir(0.2126 * r + 0.7152 * g + 0.0722 * b > 140 ? "clair" : "sombre");
+    };
+    const minuterie = setTimeout(() => finir(null), delaiMs);
+    entree.on("data", surDonnees);
+    ecrire("\x1b]11;?\x1b\\");
+  });
+}
+
+/**
+ * Lance l'interface. `commandes` : les fonctions de la CLI (postship.mjs
+ * les passe). Rend null en quittant, ou la ligne de commande à exécuter
+ * dans le terminal (update, uninstall, init…).
+ */
+function lancerInterface(commandes, { entree = process.stdin, sortie = process.stdout, intervalle = 30_000, detecter = true } = {}) {
+  const L = langue();
+  const U = unicode();
+  const B = U ? { v: "│", h: "─" } : { v: "|", h: "-" };
+  const ROUE = U ? ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] : ["|", "/", "-", "\\"];
+  const ecrireEcran = sortie.write.bind(sortie);
+  const config = lireConfig();
+  const machine = nomMachine();
+
+  const e = {
+    ecran: "chargement",
+    methode: 0,
     saisie: "",
-    curseur: 0,
-    histo: lireHistorique(),
-    iHisto: -1,
-    brouillon: "",
-    menu: [],
-    sel: 0,
-    menuFerme: false,
-    hauteur: 0,
-    occupe: false,
-    clavierCommande: false,
-    attente: [],
+    email: "",
+    demande: null,
+    occupe: null,
+    message: null,
+    erreur: null,
+    jetonConnexion: null,
+    choix: 0,
     moi: null,
     projets: [],
     ouverts: new Map(),
+    details: new Map(),
     majLe: null,
-    erreur: null,
-    projet: lireProjet(undefined),
-    notifier: false,
-    dernierCtrlC: 0,
-    alerte: null,
+    horsLigne: null,
+    sel: 0,
+    vue: "apercu",
+    sortie: [],
+    defil: 0,
+    journal: [],
+    projetDefaut: config.projetDefaut ?? lireProjet(undefined) ?? null,
+    notifications: config.notifications === true,
+    palette: false,
+    menu: [],
+    selMenu: 0,
+    histo: lireHistorique(),
+    iHisto: -1,
+    aide: false,
+    flash: null,
+    action: null,
+    image: 0,
+    precedent: [],
     versionDispo: null,
-    jeton: null,
-    pret: false,
     fin: false,
+    suite: null,
   };
+  /** Quitte l'interface ; `suite` : la commande à lancer ensuite dans le terminal. */
+  let quitter = (suite = null) => void suite;
 
-  // Chaque commande tourne dans son propre contexte : une commande annulée
-  // (Ctrl+C) continue peut-être en arrière-plan, mais plus rien d'elle ne
-  // s'écrit — ni ses lignes, ni sa roue.
+  // --- les sorties des commandes, capturées dans la vue Sortie ----------
+
   const als = new AsyncLocalStorage();
   const muet = () => als.getStore()?.annule === true;
-  const origines = { log: console.log, error: console.error, out: process.stdout.write, err: process.stderr.write };
-  console.log = (...a) => {
-    if (!muet()) origines.log.apply(console, a);
-  };
-  console.error = (...a) => {
-    if (!muet()) origines.error.apply(console, a);
-  };
-  process.stdout.write = function (...a) {
-    return muet() ? true : origines.out.apply(process.stdout, a);
-  };
-  process.stderr.write = function (...a) {
-    return muet() ? true : origines.err.apply(process.stderr, a);
-  };
-
-  const largeur = () => Math.max(30, (sortie.columns || 80) - 1);
-  const hauteurMax = () => Math.max(6, (sortie.rows || 24) - 2);
-  const nomProjet = (id) => etat.projets.find((p) => p.id === id || String(p.id).startsWith(String(id)))?.name ?? (id ? String(id).slice(0, 8) : null);
-  const totalOuverts = () => [...etat.ouverts.values()].reduce((n, liste) => n + (liste?.length ?? 0), 0);
-
-  function ligneStatut(w) {
-    let droite = peindre("dim", w < 90 ? t("? aide", "? help") : t("/ commandes · ? aide", "/ commands · ? help"));
-    let gauche;
-    if (etat.alerte) gauche = peindre("yellow", etat.alerte);
-    else if (!etat.moi && !lireJeton()) gauche = `${peindre("dim", u ? "○" : "o")} ${t("non connecté — tapez login", "not signed in — type login")}`;
-    else if (!etat.moi) gauche = etat.erreur ? `${symbole("error")} ${peindre("yellow", etat.erreur)}` : peindre("dim", t("lecture de vos projets…", "reading your projects…"));
-    else {
-      const n = totalOuverts();
-      const heure = new Date(etat.majLe).toLocaleTimeString(l === "fr" ? "fr-FR" : "en-GB", { hour: "2-digit", minute: "2-digit" });
-      // Du plus utile au moins utile : ce qui ne tient pas tombe par la fin.
-      const morceaux = [
-        `${peindre(n > 0 ? "red" : "green", u ? "●" : "*")} ${peindre("bold", etat.projet ? nomProjet(etat.projet) : t("tous les projets", "every project"))}`,
-        n === 0 ? peindre("green", t("rien d'ouvert", "nothing open")) : peindre("red", n === 1 ? t("1 incident ouvert", "1 open incident") : t("{0} incidents ouverts", "{0} open incidents", n)),
-        etat.erreur ? peindre("yellow", t("hors ligne", "offline")) : peindre("dim", t("à jour à {0}", "as of {0}", heure)),
-        nomPlan(etat.moi.plan),
-        peindre("dim", t("{0}/{1} vérifications", "{0}/{1} checks", etat.moi.quota.used, etat.moi.quota.limit)),
-        etat.notifier ? peindre("dim", t("notifications", "notifications")) : "",
-      ].filter(Boolean);
-      const place = w - 5 - visible(droite).length;
-      while (morceaux.length > 1 && visible(morceaux.join(" · ")).length > place) morceaux.pop();
-      gauche = morceaux.join(peindre("dim", " · "));
-    }
-    if (visible(gauche).length > w - 5 - visible(droite).length) droite = peindre("dim", t("? aide", "? help"));
-    const place = w - 5 - visible(droite).length;
-    return `  ${completer(tronquer(gauche, place), place)}   ${droite}`;
-  }
-
-  /** La zone du bas : le cadre de saisie, la liste, la ligne d'état. */
-  function zone() {
-    const w = largeur();
-    const lignes = [];
-    const interieur = w - 6;
-    lignes.push(peindre("dim", B.hg + B.h.repeat(w - 2) + B.hd));
-    let texte;
-    let col;
-    if (!etat.saisie) {
-      texte = peindre("dim", tronquer(t("Tapez une commande — check example.com, wait --head… — ou / pour la liste", "Type a command — check example.com, wait --head… — or / for the list"), interieur));
-      col = 0;
-    } else {
-      const debut = Math.max(0, etat.curseur - interieur + 1);
-      texte = etat.saisie.slice(debut, debut + interieur);
-      col = etat.curseur - debut;
-    }
-    lignes.push(`${peindre("dim", B.v)} ${peindre("signal", "›")} ${completer(texte, interieur)} ${peindre("dim", B.v)}`);
-    lignes.push(peindre("dim", B.bg + B.h.repeat(w - 2) + B.bd));
-    const menu = etat.menuFerme ? [] : etat.menu;
-    const place = Math.max(0, Math.min(8, hauteurMax() - 4));
-    if (menu.length > 0 && place > 0) {
-      const debut = Math.min(Math.max(0, etat.sel - place + 1), Math.max(0, menu.length - place));
-      const vus = menu.slice(debut, debut + place);
-      const affiche = (e) => (/\s/.test(e.valeur) ? e.nom : `/${e.nom}`);
-      const largNom = Math.min(26, Math.max(...vus.map((e) => affiche(e).length)) + 2);
-      vus.forEach((e, i) => {
-        const actif = debut + i === etat.sel;
-        const nom = affiche(e);
-        const ligne = `  ${actif ? peindre("signal", "›") : " "} ${actif ? peindre("signal", peindre("bold", nom.padEnd(largNom))) : nom.padEnd(largNom)} ${peindre("dim", e.texte)}`;
-        lignes.push(tronquer(ligne, w));
-      });
-      if (menu.length > place) lignes.push(peindre("dim", `    ${t("{0} de plus — continuez à taper", "{0} more — keep typing", menu.length - place)}`));
-    }
-    lignes.push(ligneStatut(w));
-    return { lignes, col: 4 + col };
-  }
-
-  function dessiner() {
-    if (!etat.pret || etat.occupe || etat.fin) return;
-    const { lignes, col } = zone();
-    let s = "";
-    // Le curseur est sur la ligne de saisie (la 2e de la zone) : on remonte d'une ligne au cadre.
-    if (etat.hauteur > 0) s += "\x1b[1A\r";
-    s += "\x1b[J" + lignes.join("\n");
-    const monter = lignes.length - 2;
-    if (monter > 0) s += `\x1b[${monter}A`;
-    s += "\r" + (col > 0 ? `\x1b[${col}C` : "");
-    ecrireZone(s);
-    etat.hauteur = lignes.length;
-  }
-
-  function effacer() {
-    if (etat.hauteur === 0) return;
-    ecrireZone("\x1b[1A\r\x1b[J");
-    etat.hauteur = 0;
-  }
-
-  /** Des lignes au-dessus de l'invite (événements en direct, messages de la console). */
-  function auDessus(texte) {
-    if (etat.occupe) {
-      etat.attente.push(texte);
-      return;
-    }
-    effacer();
-    ecrireZone(`${texte}\n`);
+  const origines = { log: console.log, error: console.error, out: process.stdout.write, err: process.stderr.write, roue: process.env.POSTSHIP_NO_SPINNER };
+  process.env.POSTSHIP_NO_SPINNER = "1";
+  const capturer = (...a) => {
+    if (muet()) return;
+    for (const l of a.join(" ").split("\n")) e.sortie.push(masquer(l));
+    if (e.sortie.length > 2000) e.sortie.splice(0, e.sortie.length - 2000);
     dessiner();
+  };
+  console.log = capturer;
+  console.error = capturer;
+  // Une commande qui écrirait directement (sonnerie, effacement) ne doit pas griffer l'écran.
+  process.stdout.write = function (morceau, ...reste) {
+    if (sortie !== process.stdout) return origines.out.call(process.stdout, morceau, ...reste);
+    const s = String(morceau);
+    if (s === "\x07") return origines.out.call(process.stdout, s);
+    return true;
+  };
+  process.stderr.write = function (morceau) {
+    if (String(morceau) === "\x07") return origines.err.call(process.stderr, morceau);
+    return true;
+  };
+
+  // --- la composition de l'écran -----------------------------------------
+
+  const W = () => Math.max(20, sortie.columns || 80);
+  const H = () => Math.max(8, sortie.rows || 24);
+  const heure = (ms) => new Date(ms).toLocaleTimeString(L === "fr" ? "fr-FR" : "en-GB", { hour: "2-digit", minute: "2-digit" });
+  const projetChoisi = () => e.projets[e.sel] ?? null;
+  const touche = (k, texte) => `${peindre("bold", k)} ${peindre("dim", texte)}`;
+
+  function flash(texte, ms = 5000) {
+    e.flash = { texte, jusqua: Date.now() + ms };
+    dessiner();
+    setTimeout(() => dessiner(), ms + 50).unref?.();
   }
 
-  function majMenu() {
-    etat.menu = suggestionsConsole(etat.saisie, { projets: etat.projets, l });
-    if (etat.sel >= etat.menu.length) etat.sel = 0;
+  const largeurBloc = () => Math.min(72, W() - 5);
+  /** Un paragraphe replié à la largeur du bloc, d'une seule couleur. */
+  const para = (texte, couleur) => plier(texte, largeurBloc()).map((l) => (couleur ? peindre(couleur, l) : l));
+
+  /** Un bloc centré (accueil, connexion, réglages) : titre, lignes, aide du bas. */
+  function ecranCentre(lignesBloc, pied) {
+    const w = W() - 1;
+    const h = H();
+    const largeurBloc = Math.min(72, w - 4);
+    const marge = " ".repeat(Math.max(1, Math.floor((w - largeurBloc) / 2)));
+    const tete = [`${peindre("signal", peindre("bold", "<>"))} ${peindre("bold", "postship")}`, peindre("dim", t("Vos déploiements, vérifiés depuis le terminal.", "Your deploys, checked from the terminal.")), "", ""];
+    const bloc = [...tete, ...lignesBloc];
+    const haut = Math.max(1, Math.floor((h - bloc.length - 2) / 2));
+    const lignes = new Array(h).fill("");
+    bloc.forEach((l, i) => {
+      if (haut + i < h - 2) lignes[haut + i] = marge + tronquer(l, largeurBloc);
+    });
+    if (pied) lignes[h - 1] = ` ${tronquer(pied, w - 2)}`;
+    return lignes;
   }
 
-  function poser(saisie, curseur = saisie.length) {
-    etat.saisie = saisie;
-    etat.curseur = curseur;
-    etat.menuFerme = false;
-    etat.sel = 0;
-    majMenu();
+  function liste(options, index) {
+    return options.map((o, i) => {
+      const actif = i === index;
+      const texte = `${actif ? peindre("signal", U ? "›" : ">") : " "} ${actif ? peindre("bold", o) : o}`;
+      return actif ? surFond("choix", ` ${completer(texte, 44)} `) : ` ${texte}`;
+    });
+  }
+
+  function champ(valeur, masque = false) {
+    const affiche = masque ? (U ? "•" : "*").repeat(Math.min(valeur.length, 40)) : valeur;
+    const curseur = couleursActives() ? "\x1b[7m \x1b[27m" : "_";
+    return [`  ${affiche}${curseur}`, `  ${peindre("trait", B.h.repeat(46))}`];
+  }
+
+  function ligneEtat() {
+    if (e.occupe) return [`  ${peindre("signal", ROUE[e.image % ROUE.length])} ${e.occupe}`];
+    if (e.erreur) return para(`${U ? "×" : "x"} ${e.erreur}`, "red");
+    if (e.message) return para(e.message, "dim");
+    return [];
+  }
+
+  function ecranConnexion() {
+    const pied = `${touche(U ? "↑↓" : "Up/Down", t("choisir", "choose"))}   ${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche("q", t("quitter", "quit"))}`;
+    return ecranCentre([...para(t("Comment voulez-vous vous connecter ?", "How do you want to sign in?")), "", ...liste(METHODES.map((m) => m[L]), e.methode), "", ...ligneEtat()], pied);
+  }
+
+  function ecranAppareil(qr) {
+    const d = e.demande;
+    const pied = `${touche(t("Échap", "Esc"), t("revenir", "back"))}   ${touche("q", t("quitter", "quit"))}`;
+    if (!d) return ecranCentre([...ligneEtat()], pied);
+    const code = peindre("signal", peindre("bold", d.userCode.split("").join(" ")));
+    const lignes = [];
+    if (qr) {
+      const dessin = couleursActives() ? dessinerQr(d.lienComplet, { profondeur: profondeur() === 24 ? 24 : 4 }) : [];
+      const tient = dessin.length > 0 && dessin.length + 11 <= H() && visible(dessin[0]).length + 8 <= W();
+      lignes.push(...para(t("Scannez ce QR code avec l'appareil photo du téléphone, puis autorisez.", "Scan this QR code with your phone's camera, then authorize.")), "");
+      if (tient) lignes.push(...dessin.map((l) => `  ${l}`), "");
+      else lignes.push(...para(t("Agrandissez la fenêtre pour voir le QR code, ou ouvrez :", "Enlarge the window to see the QR code, or open:"), "yellow"), `  ${d.lienComplet}`, "");
+      lignes.push(`${t("Le téléphone doit afficher ce code", "The phone must show this code")} :  ${code}`);
+    } else {
+      lignes.push(...para(t("Le navigateur s'ouvre sur postship.fr. Vérifiez que le code affiché est le même, puis « Autoriser ce terminal ».", "The browser opens on postship.fr. Check that the code shown is the same, then “Authorize this terminal”.")), "");
+      lignes.push(`  ${code}`, "");
+      lignes.push(...para(t("Rien ne s'ouvre ? Allez sur {0}", "Nothing opens? Go to {0}", d.lienComplet), "dim"));
+    }
+    lignes.push("", ...ligneEtat());
+    return ecranCentre(lignes, pied);
+  }
+
+  function ecranEmail() {
+    const pied = `${touche(t("Entrée", "Enter"), t("recevoir le code", "get the code"))}   ${touche(t("Échap", "Esc"), t("revenir", "back"))}`;
+    return ecranCentre([t("Votre adresse email PostShip", "Your PostShip email address"), "", ...champ(e.saisie), "", ...para(t("Le même code qu'à la connexion sur postship.fr, valable 15 minutes.", "The same code as when signing in on postship.fr, valid 15 minutes."), "dim"), "", ...ligneEtat()], pied);
+  }
+
+  function ecranCode() {
+    const pied = `${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche("r", t("renvoyer le code", "resend the code"))}   ${touche(t("Échap", "Esc"), t("changer d'adresse", "change address"))}`;
+    return ecranCentre([...para(t("Si un compte existe pour {0}, un code vient de partir. Tapez-le :", "If an account exists for {0}, a code was just sent. Type it:", e.email)), "", ...champ(e.saisie), "", ...para(t("Pensez aux indésirables. Pas encore de compte ? Créez-le sur postship.fr.", "Check your spam folder. No account yet? Create it on postship.fr."), "dim"), "", ...ligneEtat()], pied);
+  }
+
+  function ecranCle() {
+    const pied = `${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche(t("Échap", "Esc"), t("revenir", "back"))}`;
+    return ecranCentre([t("Collez votre clé d'API", "Paste your API key"), "", ...champ(e.saisie, true), "", ...para(t("Elle commence par psk_ ; créez-la dans Compte → API sur postship.fr. Elle ne s'affiche pas ici.", "It starts with psk_; create it in Account → API on postship.fr. It is not shown here."), "dim"), "", ...ligneEtat()], pied);
+  }
+
+  function ecranProjetDefaut() {
+    const options = [t("Tous les projets", "Every project"), ...e.projets.map((p) => p.name)];
+    const pied = `${touche(U ? "↑↓" : "Up/Down", t("choisir", "choose"))}   ${touche(t("Entrée", "Enter"), t("valider", "confirm"))}`;
+    return ecranCentre([...para(t("Quel projet afficher en premier ?", "Which project should open first?")), "", ...liste(options.slice(0, Math.max(3, H() - 16)), e.choix), "", ...para(t("Modifiable plus tard : / puis reglages, ou d sur un projet.", "Change it later: / then reglages, or d on a project."), "dim")], pied);
+  }
+
+  function ecranNotifications() {
+    const pied = `${touche(U ? "↑↓" : "Up/Down", t("choisir", "choose"))}   ${touche(t("Entrée", "Enter"), t("valider", "confirm"))}`;
+    return ecranCentre([...para(t("Une notification du bureau quand un incident s'ouvre ou se ferme ?", "A desktop notification when an incident opens or closes?")), "", ...liste([t("Oui", "Yes"), t("Non, la sonnerie et la ligne du bas suffisent", "No, the ring and the bottom line are enough")], e.choix), "", ...para(t("Modifiable plus tard : n dans l'interface.", "Change it later: n in the interface."), "dim")], pied);
+  }
+
+  // --- l'écran principal -------------------------------------------------
+
+  function panneauProjets(lw, n) {
+    const l = [` ${peindre("dim", t("Projets", "Projects"))}${e.projets.length ? peindre("dim", `  ${e.projets.length}`) : ""}`, ""];
+    if (e.projets.length === 0) {
+      l.push(` ${peindre("dim", t("Aucun projet.", "No project."))}`, ` ${peindre("dim", t("Créez-en un sur postship.fr", "Create one on postship.fr"))}`);
+      return l;
+    }
+    const place = n - 2;
+    const debut = Math.min(Math.max(0, e.sel - Math.floor(place / 2)), Math.max(0, e.projets.length - place));
+    for (const [i, p] of e.projets.slice(debut, debut + place).entries()) {
+      const index = debut + i;
+      const etat = p.paused ? "muted" : p.status;
+      const nb = e.ouverts.get(p.id)?.length ?? 0;
+      const droite = p.paused ? peindre("dim", t("pause", "paused")) : nb ? peindre("red", String(nb)) : "";
+      const point = peindre(TEINTE[etat] ?? "dim", p.paused ? (U ? "○" : "o") : U ? "●" : "*");
+      const marqueur = index === e.sel && !couleursActives() ? ">" : " ";
+      const nom = tronquer(p.name, lw - 6 - visible(droite).length);
+      const texte = `${marqueur}${point} ${index === e.sel ? peindre("bold", nom) : nom}`;
+      const ligne = `${completer(texte, lw - 1 - visible(droite).length)}${droite}`;
+      l.push(index === e.sel ? surFond("choix", completer(ligne, lw)) : ligne);
+    }
+    return l;
+  }
+
+  function ongletsVues() {
+    return VUES.map((v) => (v.id === e.vue ? peindre("signal", peindre("bold", v[L])) : peindre("dim", v[L]))).join("   ");
+  }
+
+  function vueApercu(p, rw) {
+    const l = [];
+    l.push(`${peindre("bold", p.name)}  ${peindre("dim", adresseCourte(p.url))}`, "");
+    const ouverts = e.ouverts.get(p.id) ?? [];
+    if (p.paused) l.push(`${symbole("muted")} ${peindre("dim", t("En pause : aucune vérification.", "Paused: no checks."))}`);
+    else if (ouverts.length === 0) l.push(`${symbole("pass")} ${peindre("green", t("Rien d'ouvert", "Nothing open"))}`);
+    else {
+      l.push(`${peindre("red", U ? "●" : "*")} ${peindre("red", ouverts.length === 1 ? t("1 incident ouvert", "1 open incident") : t("{0} incidents ouverts", "{0} open incidents", ouverts.length))}`);
+      for (const i of ouverts.slice(0, 4)) l.push(`   ${symbole(i.outcome)} ${adresseCourte(i.url)}  ${peindre("dim", i.kind ?? "")}  ${peindre("dim", t("constaté {0}", "seen {0}", relatif(i.since)))}`);
+      if (ouverts.length > 4) l.push(peindre("dim", `   ${t("… et {0} autres — 2 pour la liste", "… and {0} more — 2 for the list", ouverts.length - 4)}`));
+    }
+    l.push("");
+    const d = e.details.get(p.id);
+    const lab = (s) => peindre("dim", s.padEnd(14));
+    if (!d) l.push(peindre("dim", t("Lecture…", "Reading…")));
+    else {
+      l.push(`${lab(t("Dernier ship", "Last ship"))}${d.ship ? ligneShip(d.ship, "") : peindre("dim", t("aucun déploiement suivi", "no deploy tracked"))}`);
+      const scores = (d.ships ?? []).filter((s) => typeof s.score === "number");
+      if (scores.length > 1) l.push(`${lab(t("Historique", "History"))}${courbe([...d.ships].reverse().map((s) => s.score))}  ${peindre("dim", t("moyenne {0}", "average {0}", Math.round(scores.reduce((a, s) => a + s.score, 0) / scores.length)))}`);
+      if (d.urls) {
+        const actives = d.urls.filter((u) => u.enabled);
+        const ko = actives.filter((u) => u.outcome === "fail" || u.outcome === "error").length;
+        l.push(`${lab("URLs")}${t("{0} surveillées", "{0} monitored", actives.length)}${ko ? peindre("red", ` · ${ko} ${t("en échec", "failing")}`) : peindre("green", ` · ${t("toutes bonnes", "all good")}`)}`);
+      }
+    }
+    const evenements = e.journal.filter((x) => x.projet === p.id).slice(0, 5);
+    if (evenements.length) {
+      l.push("", peindre("dim", t("Pendant cette séance", "This session")));
+      for (const x of evenements) l.push(`${peindre("dim", x.heure)}  ${x.texte}`);
+    }
+    return l.map((x) => tronquer(x, rw));
+  }
+
+  function vueIncidents(p) {
+    const ouverts = e.ouverts.get(p.id) ?? [];
+    if (!ouverts.length) return [`${symbole("pass")} ${peindre("green", t("Rien d'ouvert sur {0}.", "Nothing open on {0}.", p.name))}`];
+    return ouverts.map((i) => `${symbole(i.outcome)} ${adresseCourte(i.url)}  ${peindre("dim", i.kind ?? "")}  ${peindre("dim", t("constaté {0}", "seen {0}", relatif(i.since)))}`);
+  }
+
+  function vueShips(p) {
+    const d = e.details.get(p.id);
+    if (!d) return [peindre("dim", t("Lecture…", "Reading…"))];
+    if (!d.ships?.length) return [peindre("dim", t("Aucun déploiement de production suivi.", "No production deploy tracked."))];
+    const l = [];
+    if (d.ships.length > 1) l.push(`${courbe([...d.ships].reverse().map((s) => s.score))}  ${peindre("dim", t("{0} derniers ships", "last {0} ships", d.ships.length))}`, "");
+    for (const s of d.ships) l.push(`${verdict(s.outcome)}  ${peindre("bold", String(s.sha ?? "").slice(0, 7) || "—")}  ${peindre("dim", (s.provider ?? "—").padEnd(8))}  ${relatif(s.at).padEnd(14)}  ${typeof s.score === "number" ? jauge(s.score) : peindre("dim", "—")}`);
+    return l;
+  }
+
+  function vueUrls(p) {
+    const d = e.details.get(p.id);
+    if (!d?.urls) return [peindre("dim", t("Lecture…", "Reading…"))];
+    if (!d.urls.length) return [peindre("dim", t("Aucune URL.", "No URL."))];
+    return d.urls.map((u) => `${verdict(u.enabled ? u.outcome : "muted")}  ${peindre("dim", String(u.kind ?? "").padEnd(12))}  ${adresseCourte(u.url)}  ${peindre("dim", relatif(u.lastCheckedAt))}`);
+  }
+
+  function vueSortie(n) {
+    if (!e.sortie.length) return [peindre("dim", t("Le résultat des commandes s'affiche ici : c vérifie le projet, / ouvre la liste des commandes.", "Command results show up here: c checks the project, / opens the command list."))];
+    const place = Math.max(1, n);
+    const fin = Math.max(0, e.sortie.length - e.defil);
+    return e.sortie.slice(Math.max(0, fin - place), fin);
+  }
+
+  function panneauDetail(rw, n) {
+    const l = [ongletsVues(), ""];
+    const p = projetChoisi();
+    if (e.vue === "sortie") l.push(...vueSortie(n - 2));
+    else if (!p) l.push(peindre("dim", t("Aucun projet à afficher.", "No project to show.")));
+    else if (e.vue === "apercu") l.push(...vueApercu(p, rw));
+    else if (e.vue === "incidents") l.push(...vueIncidents(p));
+    else if (e.vue === "ships") l.push(...vueShips(p));
+    else if (e.vue === "urls") l.push(...vueUrls(p));
+    return l.slice(0, n).map((x) => tronquer(x, rw));
+  }
+
+  function piedDePage(w) {
+    if (e.palette) {
+      const curseur = couleursActives() ? "\x1b[7m \x1b[27m" : "_";
+      const droite = peindre("dim", `${t("Entrée", "Enter")} ${t("lancer", "run")} · Tab ${t("compléter", "complete")} · ${t("Échap", "Esc")} ${t("fermer", "close")}`);
+      const gauche = ` ${peindre("signal", "/")}${e.saisie}${curseur}`;
+      return `${completer(tronquer(gauche, w - visible(droite).length - 2), w - visible(droite).length - 1)}${droite}`;
+    }
+    if (e.action) {
+      const gauche = ` ${peindre("signal", ROUE[e.image % ROUE.length])} ${e.action.libelle}`;
+      const droite = peindre("dim", t("Échap annule", "Esc cancels"));
+      return `${completer(tronquer(gauche, w - 16), w - visible(droite).length - 1)}${droite}`;
+    }
+    if (e.flash && Date.now() < e.flash.jusqua) return ` ${tronquer(e.flash.texte, w - 2)}`;
+    const toujours = [touche("?", t("aide", "help")), touche("q", t("quitter", "quit"))];
+    const raccourcis = [
+      touche(U ? "↑↓" : "Up/Dn", t("projet", "project")),
+      touche(U ? "←→" : "Left/Right", t("vue", "view")),
+      touche("c", t("vérifier", "check")),
+      touche("w", t("attendre le ship", "wait for the ship")),
+      touche("o", t("ouvrir", "open")),
+      touche("/", t("commande", "command")),
+      touche("r", t("relire", "refresh")),
+    ];
+    const pris = [];
+    for (const r of raccourcis) {
+      if (visible([...pris, r, ...toujours].join("   ")).length + 2 > w) break;
+      pris.push(r);
+    }
+    return ` ${[...pris, ...toujours].join("   ")}`;
+  }
+
+  function ecranPrincipal() {
+    const w = W() - 1;
+    const h = H();
+    const lignes = [];
+    const gauche = ` ${peindre("signal", peindre("bold", "<>"))} ${peindre("bold", "postship")}`;
+    // Du plus utile au moins utile : ce qui ne tient pas tombe par la fin.
+    const infos = [];
+    if (e.versionDispo) infos.push(peindre("yellow", t("{0} disponible — /update", "{0} available — /update", e.versionDispo)));
+    infos.push(e.horsLigne ? peindre("yellow", t("hors ligne", "offline")) : e.majLe ? peindre("dim", t("à jour à {0}", "as of {0}", heure(e.majLe))) : peindre("dim", t("lecture…", "reading…")));
+    if (e.moi) infos.push(peindre("dim", nomPlan(e.moi.plan)), peindre("dim", `${e.moi.quota.used}/${e.moi.quota.limit} ${t("vérifications", "checks")}`));
+    if (e.notifications) infos.push(peindre("dim", t("notifications", "notifications")));
+    const place = w - visible(gauche).length - 3;
+    while (infos.length > 1 && visible(infos.join(" · ")).length > place) infos.pop();
+    const droite = tronquer(infos.join(peindre("dim", " · ")), Math.max(0, place));
+    lignes.push(`${completer(gauche, w - visible(droite).length - 1)}${droite} `);
+    lignes.push(peindre("trait", B.h.repeat(w)));
+    const corps = h - 4;
+    const lw = Math.max(24, Math.min(38, Math.floor(w * 0.28)));
+    const rw = w - lw - 3;
+    const g = panneauProjets(lw, corps);
+    const d = panneauDetail(rw, corps);
+    for (let i = 0; i < corps; i++) lignes.push(`${completer(tronquer(g[i] ?? "", lw), lw)} ${peindre("trait", B.v)} ${d[i] ?? ""}`);
+    lignes.push(peindre("trait", B.h.repeat(w)));
+    lignes.push(piedDePage(w));
+
+    // La liste des commandes, au-dessus du trait du bas.
+    if (e.palette && e.menu.length) {
+      const place = Math.min(8, corps - 1, e.menu.length);
+      const debut = Math.min(Math.max(0, e.selMenu - place + 1), Math.max(0, e.menu.length - place));
+      const vus = e.menu.slice(debut, debut + place);
+      const largNom = Math.min(24, Math.max(...vus.map((x) => x.nom.length)) + 2);
+      vus.forEach((x, i) => {
+        const actif = debut + i === e.selMenu;
+        const texte = ` ${actif ? peindre("signal", U ? "›" : ">") : " "} ${peindre("bold", x.nom.padEnd(largNom))} ${peindre("dim", x.texte)}`;
+        const ligne = completer(tronquer(texte, w), w);
+        lignes[h - 2 - place + i] = actif ? surFond("choix", ligne) : ligne;
+      });
+    }
+
+    // L'aide : un bandeau au milieu, qui se ferme à la première touche.
+    if (e.aide) {
+      const col = (k, v) => `${peindre("bold", k.padEnd(8))}${peindre("dim", v)}`;
+      const gaucheA = [col(U ? "↑ ↓" : "Up Dn", t("choisir un projet", "choose a project")), col(U ? "← →" : "Lt Rt", t("changer de vue", "switch view")), col("1-5", t("aller à une vue", "go to a view")), col("PgUp/Dn", t("défiler la sortie", "scroll the output")), col("/", t("taper une commande", "type a command")), col(t("Échap", "Esc"), t("annuler, fermer", "cancel, close"))];
+      const droiteA = [col("c", t("vérifier le projet (1 du quota)", "check the project (1 of quota)")), col("w", t("attendre le prochain ship", "wait for the next ship")), col("o", t("ouvrir dans le navigateur", "open in the browser")), col("r", t("relire maintenant", "read now")), col("d", t("projet par défaut", "default project")), col("n", t("notifications du bureau", "desktop notifications"))];
+      const bloc = [peindre("bold", t("Raccourcis", "Shortcuts")), ""];
+      for (let i = 0; i < gaucheA.length; i++) bloc.push(`${completer(gaucheA[i], 34)}${droiteA[i] ?? ""}`);
+      bloc.push("", peindre("dim", t("/ puis une commande : check example.com, wait --head, ships, whoami, logout, update…", "/ then a command: check example.com, wait --head, ships, whoami, logout, update…")), peindre("dim", t("q quitte l'interface. Une touche ferme cette aide.", "q quits the interface. Any key closes this help.")));
+      const haut = Math.max(2, Math.floor((h - bloc.length) / 2) - 1);
+      const marge = " ".repeat(Math.max(2, Math.floor((w - 76) / 2)));
+      lignes[haut - 1] = peindre("trait", B.h.repeat(w));
+      bloc.forEach((b, i) => (lignes[haut + i] = completer(`${marge}${tronquer(b, w - marge.length)}`, w)));
+      lignes[haut + bloc.length] = peindre("trait", B.h.repeat(w));
+    }
+    return lignes;
+  }
+
+  function composer() {
+    if (W() < LARGEUR_MIN || H() < HAUTEUR_MIN) {
+      const lignes = new Array(H()).fill("");
+      lignes[Math.floor(H() / 2) - 1] = ` ${peindre("bold", "postship")}`;
+      lignes[Math.floor(H() / 2)] = ` ${t("Agrandissez la fenêtre ({0} × {1} au moins).", "Enlarge the window ({0} × {1} at least).", LARGEUR_MIN, HAUTEUR_MIN)}`;
+      return lignes;
+    }
+    switch (e.ecran) {
+      case "chargement":
+        return ecranCentre([...ligneEtat()], "");
+      case "connexion":
+        return ecranConnexion();
+      case "navigateur":
+        return ecranAppareil(false);
+      case "qr":
+        return ecranAppareil(true);
+      case "email":
+        return ecranEmail();
+      case "code":
+        return ecranCode();
+      case "cle":
+        return ecranCle();
+      case "projet-defaut":
+        return ecranProjetDefaut();
+      case "notifications":
+        return ecranNotifications();
+      default:
+        return ecranPrincipal();
+    }
+  }
+
+  let prevue = false;
+  function dessiner() {
+    if (e.fin || prevue) return;
+    // Une seule recomposition par tour de boucle, même après dix changements.
+    prevue = true;
+    queueMicrotask(() => {
+      prevue = false;
+      if (e.fin) return;
+      const lignes = composer();
+      let s = "\x1b[?2026h";
+      for (let i = 0; i < H(); i++) {
+        const l = lignes[i] ?? "";
+        if (e.precedent[i] === l) continue;
+        s += `\x1b[${i + 1};1H${l}\x1b[0m\x1b[K`;
+      }
+      s += "\x1b[?2026l";
+      e.precedent = lignes.slice(0, H());
+      ecrireEcran(s);
+    });
   }
 
   // --- les données en direct -------------------------------------------
 
   async function rafraichir(annoncer = true) {
-    if (etat.fin) return;
-    if (!lireJeton()) {
-      Object.assign(etat, { moi: null, projets: [], ouverts: new Map(), majLe: Date.now(), erreur: null });
-      dessiner();
-      return;
-    }
+    if (e.fin || !lireJeton()) return;
     try {
-      const [moi, liste] = await Promise.all([appelAuthentifie("GET", "/api/v1/me"), appelAuthentifie("GET", "/api/v1/projects")]);
-      const projets = liste?.projects ?? [];
-      const suivis = projets.filter((p) => !p.paused).slice(0, PROJETS_SUIVIS_CONSOLE);
+      const [moi, listeP] = await Promise.all([appelAuthentifie("GET", "/api/v1/me"), appelAuthentifie("GET", "/api/v1/projects")]);
+      const projets = listeP?.projects ?? [];
+      const suivis = projets.filter((p) => !p.paused).slice(0, PROJETS_SUIVIS_INTERFACE);
       const lus = await Promise.all(suivis.map((p) => appelAuthentifie("GET", `/api/v1/projects/${encodeURIComponent(p.id)}/incidents`).catch(() => null)));
-      const ouverts = new Map(suivis.map((p, i) => [p.id, lus[i] ? (lus[i].incidents ?? []) : (etat.ouverts.get(p.id) ?? [])]));
-      if (annoncer && etat.moi) {
+      const ouverts = new Map(suivis.map((p, i) => [p.id, lus[i] ? (lus[i].incidents ?? []) : (e.ouverts.get(p.id) ?? [])]));
+      if (annoncer && e.moi) {
         const cle = (i) => `${i.url}|${i.kind ?? ""}`;
-        const heure = new Date().toLocaleTimeString(l === "fr" ? "fr-FR" : "en-GB", { hour: "2-digit", minute: "2-digit" });
-        const lignes = [];
         const titres = [];
         for (const p of suivis) {
-          const avant = new Set((etat.ouverts.get(p.id) ?? []).map(cle));
+          if (!e.ouverts.has(p.id)) continue;
+          const avant = new Set((e.ouverts.get(p.id) ?? []).map(cle));
           const apres = new Set((ouverts.get(p.id) ?? []).map(cle));
-          if (!etat.ouverts.has(p.id)) continue;
           for (const i of ouverts.get(p.id) ?? []) {
             if (avant.has(cle(i))) continue;
-            lignes.push(`${peindre("dim", heure)}  ${symbole("fail")} ${peindre("red", t("incident ouvert", "incident opened"))}  ${adresseCourte(i.url)} ${peindre("dim", `· ${p.name}`)}`);
-            titres.push(adresseCourte(i.url));
+            const texte = `${symbole("fail")} ${peindre("red", t("incident ouvert", "incident opened"))}  ${adresseCourte(i.url)}`;
+            e.journal.unshift({ projet: p.id, heure: heure(Date.now()), texte });
+            titres.push({ texte: `${texte} ${peindre("dim", `· ${p.name}`)}`, brut: adresseCourte(i.url), ouvert: true });
           }
-          for (const i of etat.ouverts.get(p.id) ?? []) {
+          for (const i of e.ouverts.get(p.id) ?? []) {
             if (apres.has(cle(i))) continue;
-            lignes.push(`${peindre("dim", heure)}  ${symbole("pass")} ${peindre("green", t("résolu", "resolved"))}  ${adresseCourte(i.url)} ${peindre("dim", `· ${p.name}`)}`);
-            titres.push(adresseCourte(i.url));
+            const texte = `${symbole("pass")} ${peindre("green", t("résolu", "resolved"))}  ${adresseCourte(i.url)}`;
+            e.journal.unshift({ projet: p.id, heure: heure(Date.now()), texte });
+            titres.push({ texte: `${texte} ${peindre("dim", `· ${p.name}`)}`, brut: adresseCourte(i.url), ouvert: false });
           }
         }
-        if (lignes.length > 0) {
+        e.journal.splice(50);
+        if (titres.length) {
           sonner();
-          if (etat.notifier) notifierBureau(t("PostShip — {0} changement(s)", "PostShip — {0} change(s)", lignes.length), titres.join(", "));
-          Object.assign(etat, { moi, projets, ouverts, majLe: Date.now(), erreur: null });
-          auDessus(lignes.join("\n"));
-          return;
+          flash(titres.map((x) => x.texte).join("   "), 15_000);
+          if (e.notifications) notifierBureau(titres.some((x) => x.ouvert) ? t("PostShip — incident ouvert", "PostShip — incident opened") : t("PostShip — incident résolu", "PostShip — incident resolved"), titres.map((x) => x.brut).join(", "));
         }
       }
-      Object.assign(etat, { moi, projets, ouverts, majLe: Date.now(), erreur: null });
-    } catch (e) {
-      etat.erreur = e?.message ?? String(e);
+      const choisi = projetChoisi()?.id;
+      Object.assign(e, { moi, projets, ouverts, majLe: Date.now(), horsLigne: null });
+      if (choisi) e.sel = Math.max(0, e.projets.findIndex((p) => p.id === choisi));
+      if (e.sel >= e.projets.length) e.sel = Math.max(0, e.projets.length - 1);
+    } catch (err) {
+      if (err?.status === 401) {
+        // Clé révoquée ou expirée : retour à la connexion, avec la raison.
+        Object.assign(e, { moi: null, ecran: "connexion", erreur: t("Votre clé n'est plus acceptée : reconnectez ce terminal.", "Your key is no longer accepted: sign this terminal in again.") });
+      } else e.horsLigne = err?.message ?? String(err);
     }
     dessiner();
   }
 
-  // --- l'accueil ---------------------------------------------------------
-
-  function accueil() {
-    const w = Math.min(largeur(), 78);
-    const interieur = w - 4;
-    const cadre = (texte = "") => `${peindre("dim", B.v)} ${completer(tronquer(texte, interieur), interieur)} ${peindre("dim", B.v)}`;
-    const lignes = [peindre("dim", B.hg + B.h.repeat(w - 2) + B.hd)];
-    lignes.push(cadre(`${peindre("signal", peindre("bold", "<>"))} ${peindre("bold", "postship")} ${peindre("dim", VERSION.startsWith("__") ? "dev" : VERSION)}`));
-    lignes.push(cadre());
-    lignes.push(cadre(`  ${t("Vos déploiements, vérifiés depuis le terminal.", "Your deploys, checked from the terminal.")}`));
-    lignes.push(cadre());
-    if (etat.moi) {
-      lignes.push(cadre(`  ${peindre("bold", nomPlan(etat.moi.plan))} ${peindre("dim", "·")} ${jaugeQuota(etat.moi.quota.used, etat.moi.quota.limit)} ${peindre("dim", t("vérifications ce mois", "checks this month"))}`));
-      if (etat.projet) lignes.push(cadre(`  ${t("Projet de la session", "Session project")} : ${peindre("bold", nomProjet(etat.projet))} ${peindre("dim", "(.postship.json)")}`));
-    } else if (!lireJeton()) {
-      lignes.push(cadre(`  ${t("Ce terminal n'est pas connecté : tapez", "This terminal is not signed in: type")} ${peindre("bold", "login")}.`));
-    } else if (etat.erreur) {
-      lignes.push(cadre(`  ${symbole("error")} ${etat.erreur}`));
-    }
-    if (etat.versionDispo) lignes.push(cadre(`  ${peindre("yellow", t("postship {0} est disponible", "postship {0} is available", etat.versionDispo))} ${peindre("dim", "— /update")}`));
-    lignes.push(peindre("dim", B.bg + B.h.repeat(w - 2) + B.bd));
-    ecrireZone(`\n${lignes.join("\n")}\n`);
-
-    if (etat.moi && etat.projets.length > 0) {
-      ecrireZone("\n");
-      const liste = etat.projets.slice(0, 8);
-      const largNom = Math.max(...liste.map((p) => p.name.length));
-      const largUrl = Math.max(...liste.map((p) => adresseCourte(p.url).length));
-      const avecAdresse = largNom + largUrl + 40 <= largeur();
-      for (const p of liste) {
-        const etatP = p.paused ? "muted" : p.status;
-        const n = etat.ouverts.get(p.id)?.length;
-        const incidents = p.paused ? peindre("dim", t("en pause", "paused")) : n ? peindre("red", n === 1 ? t("1 incident ouvert", "1 open incident") : t("{0} incidents ouverts", "{0} open incidents", n)) : peindre("dim", t("rien d'ouvert", "nothing open"));
-        const adresse = avecAdresse ? `  ${peindre("dim", adresseCourte(p.url).padEnd(largUrl))}` : "";
-        ecrireZone(`${tronquer(`  ${peindre(TEINTE[etatP] ?? "dim", u ? "●" : "*")} ${p.name.padEnd(largNom)}${adresse}  ${verdict(etatP)}  ${incidents}`, largeur())}\n`);
-      }
-      if (etat.projets.length > liste.length) ecrireZone(peindre("dim", `  ${t("… et {0} autres — projects pour la liste", "… and {0} more — projects for the list", etat.projets.length - liste.length)}\n`));
-    }
-    const large = largeur();
-    const essais = ["check example.com", "wait --head", "incidents", "/projet"];
-    const lignesEssai = [];
-    let courante = `  ${t("Essayez", "Try")} `;
-    for (const e of essais) {
-      if (visible(courante).length + e.length + 3 > large && lignesEssai.length < 3) {
-        lignesEssai.push(courante);
-        courante = "   ";
-      }
-      courante += ` ${e} ·`;
-    }
-    lignesEssai.push(courante.replace(/ ·$/, ""));
-    ecrireZone(`\n${lignesEssai.map((x) => x.replace(/^( +\S*)/, (m) => peindre("dim", m)).replace(/ · /g, peindre("dim", " · "))).join("\n")}\n`);
-    const astuce = t("Un incident qui s'ouvre ou se ferme s'affiche ici tout seul : la console relit vos projets toutes les 30 s.", "An incident opening or closing shows up here on its own: the console reads your projects every 30 s.");
-    ecrireZone(`${plier(astuce, large - 2).map((x) => peindre("dim", `  ${x}`)).join("\n")}\n\n`);
+  async function chargerDetails(p, forcer = false) {
+    if (!p || e.fin) return;
+    const d = e.details.get(p.id);
+    if (d && !forcer && Date.now() - d.lu < 60_000) return;
+    const id = encodeURIComponent(p.id);
+    const [ls, sh, pr] = await Promise.all([
+      appelAuthentifie("GET", `/api/v1/projects/${id}/last-ship`).catch(() => null),
+      appelAuthentifie("GET", `/api/v1/projects/${id}/ships?limit=20`).catch(() => null),
+      appelAuthentifie("GET", `/api/v1/projects/${id}`).catch(() => null),
+    ]);
+    e.details.set(p.id, { ship: ls?.lastShip ?? null, ships: sh?.ships ?? [], urls: pr?.project?.urls ?? null, lu: Date.now() });
+    dessiner();
   }
 
-  function afficherAide() {
-    const lignes = [];
-    for (const g of GROUPES) {
-      lignes.push(`  ${peindre("bold", g[l])}`);
-      for (const nom of g.commandes) if (!HORS_CONSOLE.has(nom)) lignes.push(`    ${nom.padEnd(12)} ${peindre("dim", COMMANDES[nom].resume[l])}`);
-      lignes.push("");
-    }
-    lignes.push(`  ${peindre("bold", t("La console", "The console"))}`);
-    for (const [nom, texte] of Object.entries(SESSION_CONSOLE)) lignes.push(`    ${`/${nom}`.padEnd(12)} ${peindre("dim", texte[l])}`);
-    lignes.push("");
-    lignes.push(`  ${peindre("bold", t("Raccourcis", "Shortcuts"))}`);
-    const raccourcis = [
-      ["/", t("la liste des commandes", "the command list")],
-      ["Tab", t("compléter (commande, projet, page)", "complete (command, project, page)")],
-      [u ? "↑ ↓" : "Up Down", t("l'historique, ou la liste quand elle est ouverte", "history, or the list when it is open")],
-      [t("Échap", "Esc"), t("fermer la liste, vider la ligne, annuler la commande en cours", "close the list, clear the line, cancel the running command")],
-      ["Ctrl+C", t("annuler la commande en cours · deux fois pour quitter", "cancel the running command · twice to quit")],
-      ["Ctrl+L", t("effacer l'écran", "clear the screen")],
-      ["Ctrl+D", t("quitter", "quit")],
-    ];
-    for (const [k, v] of raccourcis) lignes.push(`    ${k.padEnd(12)} ${peindre("dim", v)}`);
-    lignes.push("");
-    lignes.push(peindre("dim", `  ${t("Chaque commande accepte ses options : check example.com --min-score 80, wait --head --notify… help <commande> pour le détail.", "Every command takes its options: check example.com --min-score 80, wait --head --notify… help <command> for details.")}`));
-    ecrireZone(`${lignes.join("\n")}\n`);
-  }
-
-  // --- l'exécution -------------------------------------------------------
+  // --- la connexion ------------------------------------------------------
 
   function dormirAnnulable(jeton) {
     return (ms) =>
@@ -1453,360 +2288,570 @@ function lancerConsole(commandes, { entree = process.stdin, sortie = process.std
       });
   }
 
-  function annulerCommande() {
-    const jeton = etat.jeton;
-    if (!jeton || jeton.annule) return;
-    jeton.annule = true;
-    jeton.reveil?.();
-    jeton.lacher?.();
+  let animation = null;
+  function occuper(texte) {
+    e.occupe = texte;
+    e.erreur = null;
+    clearInterval(animation);
+    if (texte) {
+      animation = setInterval(() => {
+        e.image++;
+        dessiner();
+      }, 100);
+    }
+    dessiner();
   }
 
-  async function executerLigne(brut) {
-    const argv = decouperLigne(brut.replace(/^\//, ""));
-    if (argv[0] === "postship") argv.shift();
-    if (argv.length === 0) return;
-    const nom = ALIAS_CONSOLE[argv[0].toLowerCase()] ?? argv[0].toLowerCase();
-    const reste = argv.slice(1);
+  function annulerConnexion() {
+    if (e.jetonConnexion) {
+      e.jetonConnexion.annule = true;
+      e.jetonConnexion.reveil?.();
+    }
+    e.jetonConnexion = null;
+    occuper(null);
+  }
 
-    if (nom === "quitter") return "quitter";
-    if (nom === "effacer") {
-      ecrireZone("\x1b[2J\x1b[H");
-      return;
-    }
-    if (nom === "aide" && reste.length === 0) {
-      afficherAide();
-      return;
-    }
-    if (nom === "version") {
-      ecrireZone(`postship ${VERSION.startsWith("__") ? "dev" : VERSION}\n`);
-      return;
-    }
-    if (nom === "projet") {
-      const q = reste.join(" ");
-      if (!q) return "choisir-projet";
-      if (/^(tous|all|aucun|none)$/i.test(q)) {
-        etat.projet = null;
-        ecrireZone(`${symbole("pass")} ${t("Tous les projets.", "Every project.")}\n`);
-        return;
-      }
-      const p = trouverProjet(etat.projets, q);
-      if (!p) {
-        ecrireZone(`${symbole("fail")} ${t("Aucun projet ne répond à « {0} ». Tapez /projet puis Tab pour la liste.", "No project matches “{0}”. Type /projet then Tab for the list.", q)}\n`);
-        return;
-      }
-      etat.projet = p.id;
-      ecrireZone(`${symbole("pass")} ${t("Projet de la session : {0} — incidents, ship, wait, check, open s'y rapportent.", "Session project: {0} — incidents, ship, wait, check, open refer to it.", peindre("bold", p.name))}\n`);
-      return;
-    }
-    if (nom === "notifier") {
-      const v = (reste[0] ?? "").toLowerCase();
-      etat.notifier = v === "off" || v === "non" || v === "no" ? false : v === "on" || v === "oui" || v === "yes" ? true : !etat.notifier;
-      ecrireZone(`${symbole("pass")} ${etat.notifier ? t("Notifications du bureau activées pour cette session.", "Desktop notifications on for this session.") : t("Notifications du bureau coupées.", "Desktop notifications off.")}\n`);
-      return;
-    }
-    if (nom === "watch") {
-      ecrireZone(`${t("La console suit déjà vos projets toutes les 30 s : chaque incident ouvert ou résolu s'affiche ici, avec une sonnerie. /notifier active aussi les notifications du bureau.", "The console already follows your projects every 30 s: every incident opened or resolved shows up here, with a ring. /notifier also turns on desktop notifications.")}\n`);
-      return;
-    }
-    if (nom === "completion") {
-      ecrireZone(`${t("Hors de la console : postship completion bash >> ~/.bashrc (ou zsh, fish, powershell).", "Outside the console: postship completion bash >> ~/.bashrc (or zsh, fish, powershell).")}\n`);
-      return;
-    }
-    // « help check » : l'aide détaillée de la commande, comme hors de la console.
-    const fn = nom === "aide" ? commandes.help : commandes[nom];
-    if (!fn) {
-      ecrireZone(`${symbole("fail")} ${t("Commande inconnue : {0}. Tapez / pour la liste.", "Unknown command: {0}. Type / for the list.", argv[0])}\n`);
-      return;
-    }
-    const args = parseArgs([nom === "aide" ? "help" : nom, ...reste]);
-    if (args.token !== undefined) {
-      ecrireZone(`${symbole("fail")} ${t("--token n'existe pas : login, ou POSTSHIP_TOKEN.", "--token does not exist: login, or POSTSHIP_TOKEN.")}\n`);
-      return;
-    }
-    if (AVEC_PROJET.has(nom) && args.project === undefined && etat.projet) args.project = etat.projet;
-
+  async function connexionAppareil(qr) {
+    annulerConnexion();
+    Object.assign(e, { ecran: qr ? "qr" : "navigateur", demande: null, erreur: null, message: null });
     const jeton = { annule: false };
-    let apres = null;
-    etat.jeton = jeton;
-    etat.occupe = true;
-    etat.clavierCommande = AVEC_CLAVIER.has(nom);
-    let resultat;
+    e.jetonConnexion = jeton;
+    occuper(t("Demande d'un code…", "Requesting a code…"));
     try {
-      resultat = await new Promise((resolve, reject) => {
+      const d = await demarrerAppareil(machine);
+      if (jeton.annule) return;
+      e.demande = d;
+      if (!qr && !ouvrirNavigateur(d.lienComplet)) e.message = t("Le navigateur ne s'est pas ouvert : copiez l'adresse.", "The browser did not open: copy the address.");
+      occuper(t("En attente de l'autorisation…", "Waiting for the authorization…"));
+      const r = await attendreAppareil(d, { dormir: dormirAnnulable(jeton), annule: () => jeton.annule });
+      if (jeton.annule) return;
+      enregistrerConnexion({ ...r, machine });
+      await apresConnexion();
+    } catch (err) {
+      if (jeton.annule) return;
+      occuper(null);
+      e.erreur = err?.message ?? String(err);
+      dessiner();
+    }
+  }
+
+  async function apresConnexion() {
+    occuper(t("Lecture de vos projets…", "Reading your projects…"));
+    await rafraichir(false);
+    occuper(null);
+    if (e.ecran === "connexion") return;
+    const cfg = lireConfig();
+    if (!cfg.accueilFait) {
+      e.choix = Math.max(0, e.projets.findIndex((p) => p.id === e.projetDefaut) + 1);
+      e.ecran = e.projets.length ? "projet-defaut" : "notifications";
+      if (e.ecran === "notifications") e.choix = e.notifications ? 0 : 1;
+    } else versPrincipal();
+    dessiner();
+  }
+
+  function enregistrerReglages(valeurs) {
+    try {
+      ecrireConfig({ ...lireConfig(), ...valeurs });
+    } catch {
+      flash(peindre("yellow", t("Réglage non enregistré : la configuration n'est pas inscriptible.", "Setting not saved: the configuration is not writable.")));
+    }
+  }
+
+  function versPrincipal() {
+    e.ecran = "principal";
+    const i = e.projets.findIndex((p) => p.id === e.projetDefaut || String(p.id).startsWith(String(e.projetDefaut)));
+    if (i >= 0) e.sel = i;
+    void chargerDetails(projetChoisi());
+    dessiner();
+  }
+
+  // --- les commandes -------------------------------------------------------
+
+  async function executer(nom, args, libelle) {
+    if (e.action) {
+      flash(t("Une action est déjà en cours : Échap l'annule.", "An action is already running: Esc cancels it."));
+      return;
+    }
+    const fn = nom === "aide" ? commandes.help : commandes[nom];
+    if (!fn) return;
+    const jeton = { annule: false };
+    e.action = { libelle, jeton };
+    e.vue = "sortie";
+    e.defil = 0;
+    e.sortie.push("", `${peindre("signal", U ? "›" : ">")} ${peindre("bold", masquer(libelle))}`);
+    const animationAction = setInterval(() => {
+      e.image++;
+      dessiner();
+    }, 100);
+    dessiner();
+    try {
+      const r = await new Promise((resolve, reject) => {
         jeton.lacher = () => resolve("annule");
         als.run(jeton, () => {
           Promise.resolve()
-            .then(() => fn(args, { dormir: dormirAnnulable(jeton), surFin: (quoi) => (apres = quoi) }))
+            .then(() => fn(args, { dormir: dormirAnnulable(jeton), progression: false }))
             .then(resolve, reject);
         });
       });
-    } catch (e) {
-      if (!jeton.annule) ecrireZone(`${peindre("red", masquer(e?.message ?? String(e)))}\n`);
+      if (r === "annule") e.sortie.push(peindre("dim", t("Annulé.", "Cancelled.")));
+    } catch (err) {
+      if (!jeton.annule) e.sortie.push(peindre("red", masquer(err?.message ?? String(err))));
     } finally {
-      etat.occupe = false;
-      etat.clavierCommande = false;
-      etat.jeton = null;
-      // init et uninstall relâchent le clavier en finissant : on le reprend.
-      if (entree.isTTY) {
-        entree.setRawMode?.(true);
-        entree.resume();
-      }
+      clearInterval(animationAction);
+      e.action = null;
     }
-    if (resultat === "annule") ecrireZone(`\r\x1b[2K${peindre("dim", t("Annulé.", "Cancelled."))}\n`);
-    if ((nom === "login" || nom === "logout") && !jeton.annule) await rafraichir(false);
-    if (apres === "uninstall") return "quitter";
-    if (apres === "update") {
-      ecrireZone(`${t("Relancez postship pour ouvrir la nouvelle version.", "Run postship again to open the new version.")}\n`);
-      return "quitter";
+    if (nom === "logout") {
+      Object.assign(e, { moi: null, projets: [], ouverts: new Map(), details: new Map(), ecran: "connexion", methode: 0 });
+    } else if (["check", "wait", "gate", "status"].includes(nom)) {
+      void rafraichir(true);
+      void chargerDetails(projetChoisi(), true);
     }
+    dessiner();
   }
 
-  // --- le clavier --------------------------------------------------------
+  function annulerAction() {
+    const j = e.action?.jeton;
+    if (!j || j.annule) return;
+    j.annule = true;
+    j.reveil?.();
+    j.lacher?.();
+  }
 
-  return new Promise((resolveConsole) => {
-    let minuterie = null;
-
-    function quitter() {
-      if (etat.fin) return;
-      etat.fin = true;
-      clearInterval(minuterie);
-      if (etat.hauteur > 0) {
-        ecrireZone("\x1b[1A\r\x1b[J");
-        etat.hauteur = 0;
+  function lancerLigne(brut) {
+    const ligne = brut.trim();
+    if (!ligne) return;
+    if (e.histo[e.histo.length - 1] !== ligne) e.histo.push(ligne);
+    ecrireHistorique(e.histo);
+    const argv = decouperLigne(ligne.replace(/^\//, ""));
+    if (argv[0] === "postship") argv.shift();
+    if (!argv.length) return;
+    const nom = ALIAS_CONSOLE[argv[0].toLowerCase()] ?? argv[0].toLowerCase();
+    const reste = argv.slice(1);
+    switch (nom) {
+      case "quitter":
+        return quitter();
+      case "aide":
+        if (!reste.length) {
+          e.aide = true;
+          return dessiner();
+        }
+        return void executer("aide", parseArgs(["help", ...reste]), `help ${reste.join(" ")}`);
+      case "effacer":
+        e.sortie = [];
+        return dessiner();
+      case "projet": {
+        const p = trouverProjet(e.projets, reste.join(" "));
+        if (!p) return flash(peindre("yellow", t("Aucun projet ne répond à « {0} ».", "No project matches “{0}”.", reste.join(" "))));
+        e.sel = e.projets.indexOf(p);
+        e.vue = "apercu";
+        void chargerDetails(p);
+        return dessiner();
       }
+      case "notifier": {
+        const v = (reste[0] ?? "").toLowerCase();
+        e.notifications = v === "off" || v === "non" || v === "no" ? false : v === "on" || v === "oui" || v === "yes" ? true : !e.notifications;
+        enregistrerReglages({ notifications: e.notifications });
+        return flash(e.notifications ? t("Notifications du bureau activées.", "Desktop notifications on.") : t("Notifications du bureau coupées.", "Desktop notifications off."));
+      }
+      case "theme": {
+        const v = (reste[0] ?? "").toLowerCase();
+        const choix = v === "clair" || v === "light" ? "clair" : v === "sombre" || v === "dark" ? "sombre" : null;
+        enregistrerReglages({ theme: choix ?? undefined });
+        definirTheme(choix ?? "neutre");
+        e.precedent = [];
+        return flash(choix ? t("Couleurs pour un terminal {0}.", "Colours for a {0} terminal.", choix) : t("Couleurs automatiques.", "Automatic colours."));
+      }
+      case "reglages":
+        e.choix = Math.max(0, e.projets.findIndex((p) => p.id === e.projetDefaut) + 1);
+        e.ecran = e.projets.length ? "projet-defaut" : "notifications";
+        return dessiner();
+      case "login":
+        Object.assign(e, { ecran: "connexion", methode: 0, erreur: null, message: null });
+        return dessiner();
+      default:
+        break;
+    }
+    if (DANS_LE_TERMINAL.has(nom) || HORS_CONSOLE.has(nom)) return quitter([nom, ...reste]);
+    if (!commandes[nom]) return flash(peindre("yellow", t("Commande inconnue : {0}. / pour la liste.", "Unknown command: {0}. / for the list.", argv[0])));
+    const args = parseArgs([nom, ...reste]);
+    if (args.token !== undefined) return flash(peindre("yellow", t("--token n'existe pas.", "--token does not exist.")));
+    if (AVEC_PROJET_INTERFACE.has(nom) && args.project === undefined && projetChoisi()) args.project = projetChoisi().id;
+    void executer(nom, args, ligne.replace(/^\//, ""));
+  }
+
+  function ouvrirProjet() {
+    const p = projetChoisi();
+    if (!p) return;
+    const suffixe = { apercu: "", incidents: "/incidents", ships: "/deploys", urls: "/urls", sortie: "" }[e.vue] ?? "";
+    const url = `${baseUrl()}/${encodeURIComponent(p.id)}${suffixe}`;
+    flash(ouvrirNavigateur(url) ? t("Ouvert dans le navigateur : {0}", "Opened in the browser: {0}", url) : t("Ouvrez : {0}", "Open: {0}", url), 8000);
+  }
+
+  // --- le clavier ----------------------------------------------------------
+
+  function editer(touche) {
+    if (touche.nom === "backspace") e.saisie = e.saisie.slice(0, -1);
+    else if (touche.ctrl && touche.nom === "u") e.saisie = "";
+    else if (touche.ctrl && touche.nom === "w") e.saisie = e.saisie.replace(/\S+\s*$/, "");
+    else if (touche.texte) e.saisie += touche.texte;
+    else return false;
+    return true;
+  }
+
+  function surTouche(touche) {
+    const nom = touche.nom;
+    const ctrlC = touche.ctrl && nom === "c";
+    // Ctrl+C : annule ce qui tourne, sinon quitte.
+    if (ctrlC && e.action) return annulerAction();
+    if (ctrlC) return quitter();
+
+    switch (e.ecran) {
+      case "connexion": {
+        if (nom === "up") e.methode = (e.methode + METHODES.length - 1) % METHODES.length;
+        else if (nom === "down" || nom === "tab") e.methode = (e.methode + 1) % METHODES.length;
+        else if (touche.texte === "q") return quitter();
+        else if (nom === "return") {
+          const m = METHODES[e.methode].id;
+          e.erreur = null;
+          e.message = null;
+          if (m === "navigateur" || m === "qr") return void connexionAppareil(m === "qr");
+          e.saisie = "";
+          e.ecran = m === "email" ? "email" : "cle";
+        }
+        return dessiner();
+      }
+      case "navigateur":
+      case "qr":
+        if (nom === "escape") {
+          annulerConnexion();
+          e.ecran = "connexion";
+        } else if (touche.texte === "q") return quitter();
+        else if (nom === "return" && e.erreur) return void connexionAppareil(e.ecran === "qr");
+        return dessiner();
+      case "email":
+        if (nom === "escape") {
+          e.ecran = "connexion";
+          e.erreur = null;
+        } else if (nom === "return") {
+          const email = e.saisie.trim();
+          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+            e.erreur = t("Adresse email invalide.", "Invalid email address.");
+            return dessiner();
+          }
+          e.email = email;
+          occuper(t("Envoi du code…", "Sending the code…"));
+          demanderCodeEmail(email, L)
+            .then(() => {
+              occuper(null);
+              Object.assign(e, { ecran: "code", saisie: "", message: null });
+              dessiner();
+            })
+            .catch((err) => {
+              occuper(null);
+              e.erreur = err?.message ?? String(err);
+              dessiner();
+            });
+          return;
+        } else editer(touche);
+        return dessiner();
+      case "code":
+        if (nom === "escape") {
+          Object.assign(e, { ecran: "email", saisie: e.email, erreur: null });
+        } else if (touche.texte === "r" && !e.occupe) {
+          occuper(t("Envoi d'un nouveau code…", "Sending a new code…"));
+          demanderCodeEmail(e.email, L)
+            .then((r) => {
+              occuper(null);
+              e.message = r.dejaEnvoye ? t("Un code est parti il y a moins d'une minute : il reste valable (nouvel envoi dans {0} s).", "A code was sent less than a minute ago: it is still valid (new send in {0} s).", r.attente) : t("Un nouveau code vient de partir.", "A new code was just sent.");
+              dessiner();
+            })
+            .catch((err) => {
+              occuper(null);
+              e.erreur = err?.message ?? String(err);
+              dessiner();
+            });
+          return;
+        } else if (nom === "return" && !e.occupe) {
+          const code = e.saisie.replace(/\s+/g, "");
+          if (!/^\d{6,8}$/.test(code)) {
+            e.erreur = t("Le code ne contient que des chiffres (6 à 8).", "The code only has digits (6 to 8).");
+            return dessiner();
+          }
+          occuper(t("Vérification du code…", "Checking the code…"));
+          verifierCodeEmail(e.email, code, machine)
+            .then((r) => {
+              enregistrerConnexion({ ...r, machine });
+              return apresConnexion();
+            })
+            .catch((err) => {
+              occuper(null);
+              e.erreur = err?.message ?? String(err);
+              e.saisie = "";
+              dessiner();
+            });
+          return;
+        } else if (touche.texte) {
+          const chiffres = touche.texte.replace(/\D/g, "");
+          if (chiffres) e.saisie = (e.saisie + chiffres).slice(0, 8);
+        } else editer(touche);
+        return dessiner();
+      case "cle":
+        if (nom === "escape") {
+          Object.assign(e, { ecran: "connexion", saisie: "", erreur: null });
+        } else if (nom === "return" && !e.occupe) {
+          const brute = e.saisie;
+          occuper(t("Vérification de la clé…", "Checking the key…"));
+          verifierCleApi(brute)
+            .then((r) => {
+              enregistrerConnexion({ token: r.token, prefix: r.prefix, machine });
+              e.saisie = "";
+              return apresConnexion();
+            })
+            .catch((err) => {
+              occuper(null);
+              e.erreur = err?.message ?? String(err);
+              dessiner();
+            });
+          return;
+        } else editer(touche);
+        return dessiner();
+      case "projet-defaut": {
+        const n = e.projets.length + 1;
+        if (nom === "up") e.choix = (e.choix + n - 1) % n;
+        else if (nom === "down" || nom === "tab") e.choix = (e.choix + 1) % n;
+        else if (nom === "return") {
+          e.projetDefaut = e.choix === 0 ? null : e.projets[e.choix - 1].id;
+          enregistrerReglages({ projetDefaut: e.projetDefaut ?? undefined });
+          e.ecran = "notifications";
+          e.choix = e.notifications || !lireConfig().accueilFait ? 0 : 1;
+        }
+        return dessiner();
+      }
+      case "notifications":
+        if (nom === "up" || nom === "down" || nom === "tab") e.choix = e.choix === 0 ? 1 : 0;
+        else if (nom === "return") {
+          e.notifications = e.choix === 0;
+          enregistrerReglages({ notifications: e.notifications, accueilFait: true });
+          versPrincipal();
+          return flash(t("C'est prêt. ? affiche les raccourcis.", "All set. ? shows the shortcuts."));
+        }
+        return dessiner();
+      default:
+        break;
+    }
+
+    // L'écran principal. Un morceau collé (« /update --check ») se lit
+    // lettre par lettre : « / » ouvre la palette, la suite s'y écrit.
+    if (!e.palette && touche.texte && touche.texte.length > 1) {
+      for (const c of touche.texte) surTouche({ texte: c });
+      return;
+    }
+    if (e.aide) {
+      e.aide = false;
+      return dessiner();
+    }
+    if (e.palette) {
+      if (nom === "escape") {
+        e.palette = false;
+      } else if (nom === "return") {
+        const choisi = e.menu[e.selMenu];
+        const saisie = e.saisie.trim();
+        // La saisie telle quelle si elle a des arguments ; sinon la commande choisie dans la liste.
+        const ligne = /\s/.test(saisie) || !choisi ? saisie : choisi.argument ? null : choisi.valeur;
+        if (ligne === null) {
+          e.saisie = `${choisi.valeur.replace(/^\//, "")} `;
+          e.menu = suggestionsConsole(e.saisie, { projets: e.projets, l: L });
+          e.selMenu = 0;
+          return dessiner();
+        }
+        e.palette = false;
+        e.iHisto = -1;
+        lancerLigne(ligne);
+      } else if (nom === "tab" && e.menu.length) {
+        e.saisie = `${e.menu[e.selMenu].valeur.replace(/^\//, "")} `;
+        e.menu = suggestionsConsole(e.saisie, { projets: e.projets, l: L });
+        e.selMenu = 0;
+      } else if (nom === "up" || nom === "down") {
+        if (e.menu.length) e.selMenu = (e.selMenu + (nom === "up" ? e.menu.length - 1 : 1)) % e.menu.length;
+        else if (e.histo.length) {
+          e.iHisto = nom === "up" ? (e.iHisto === -1 ? e.histo.length - 1 : Math.max(0, e.iHisto - 1)) : Math.min(e.histo.length, e.iHisto + 1);
+          e.saisie = e.iHisto >= 0 && e.iHisto < e.histo.length ? e.histo[e.iHisto].replace(/^\//, "") : "";
+        }
+      } else if (editer(touche)) {
+        e.menu = suggestionsConsole(e.saisie, { projets: e.projets, l: L });
+        e.selMenu = 0;
+      }
+      return dessiner();
+    }
+    if (nom === "escape") {
+      if (e.action) return annulerAction();
+      e.flash = null;
+      return dessiner();
+    }
+    const vue = VUES.findIndex((v) => v.id === e.vue);
+    const bouger = (delta) => {
+      if (!e.projets.length) return;
+      e.sel = (e.sel + delta + e.projets.length) % e.projets.length;
+      void chargerDetails(projetChoisi());
+    };
+    switch (touche.texte ?? nom) {
+      case "up":
+      case "k":
+        bouger(-1);
+        break;
+      case "down":
+      case "j":
+        bouger(1);
+        break;
+      case "left":
+      case "h":
+      case "shift-tab":
+        e.vue = VUES[(vue + VUES.length - 1) % VUES.length].id;
+        break;
+      case "right":
+      case "l":
+      case "tab":
+        e.vue = VUES[(vue + 1) % VUES.length].id;
+        break;
+      case "1":
+      case "2":
+      case "3":
+      case "4":
+      case "5":
+        e.vue = VUES[Number(touche.texte) - 1].id;
+        break;
+      case "return":
+        e.vue = "apercu";
+        break;
+      case "pageup":
+        e.defil = Math.min(Math.max(0, e.sortie.length - 3), e.defil + Math.max(1, H() - 10));
+        break;
+      case "pagedown":
+        e.defil = Math.max(0, e.defil - Math.max(1, H() - 10));
+        break;
+      case "c":
+        if (projetChoisi()) void executer("check", { _: ["check"], project: projetChoisi().id }, t("check {0}", "check {0}", adresseCourte(projetChoisi().url)));
+        break;
+      case "w":
+        if (projetChoisi()) void executer("wait", { _: ["wait"], project: projetChoisi().id }, t("wait — le prochain ship de {0}", "wait — the next ship of {0}", projetChoisi().name));
+        break;
+      case "o":
+        ouvrirProjet();
+        break;
+      case "r":
+        flash(t("Relecture…", "Refreshing…"), 1500);
+        void rafraichir(true);
+        void chargerDetails(projetChoisi(), true);
+        break;
+      case "d":
+        if (projetChoisi()) {
+          e.projetDefaut = projetChoisi().id;
+          enregistrerReglages({ projetDefaut: e.projetDefaut });
+          flash(t("{0} s'ouvrira en premier.", "{0} will open first.", projetChoisi().name));
+        }
+        break;
+      case "n":
+        lancerLigne("notifier");
+        break;
+      case "/":
+        Object.assign(e, { palette: true, saisie: "", selMenu: 0, iHisto: -1 });
+        e.menu = suggestionsConsole("", { projets: e.projets, l: L });
+        break;
+      case "?":
+        e.aide = true;
+        break;
+      case "q":
+        return quitter();
+      default:
+        return;
+    }
+    dessiner();
+  }
+
+  // --- l'entrée et la sortie ---------------------------------------------
+
+  return new Promise((resoudre) => {
+    let minuterie = null;
+    const surDonnees = (d) => {
+      if (String(d).includes("]11;")) return;
+      for (const touche of lireTouches(d)) {
+        if (e.fin) return;
+        surTouche(touche);
+      }
+    };
+    const surRedimension = () => {
+      e.precedent = [];
+      ecrireEcran("\x1b[2J");
+      dessiner();
+    };
+    const restaurer = () => ecrireEcran("\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?1049l");
+
+    function quitterInterne(suite = null) {
+      if (e.fin) return;
+      e.fin = true;
+      clearInterval(minuterie);
+      clearInterval(animation);
+      annulerConnexion();
+      annulerAction();
       entree.off("data", surDonnees);
       sortie.off?.("resize", surRedimension);
+      process.off("exit", restaurer);
+      restaurer();
       entree.setRawMode?.(false);
       entree.pause();
       console.log = origines.log;
       console.error = origines.error;
       process.stdout.write = origines.out;
       process.stderr.write = origines.err;
-      ecrireHistorique(etat.histo);
-      ecrireZone(`${peindre("dim", t("À bientôt.", "See you."))}\n`);
-      resolveConsole(0);
+      if (origines.roue === undefined) delete process.env.POSTSHIP_NO_SPINNER;
+      else process.env.POSTSHIP_NO_SPINNER = origines.roue;
+      resoudre(suite);
     }
-
-    async function soumettre(ligne) {
-      const brut = ligne.trim();
-      poser("");
-      etat.iHisto = -1;
-      effacer();
-      if (!brut) {
-        dessiner();
-        return;
-      }
-      ecrireZone(`${peindre("signal", "›")} ${peindre("bold", masquer(brut))}\n`);
-      if (etat.histo[etat.histo.length - 1] !== brut) etat.histo.push(brut);
-      if (etat.histo.length > HISTORIQUE_MAX) etat.histo.shift();
-      ecrireHistorique(etat.histo);
-      const suite = await executerLigne(brut);
-      if (suite === "quitter") return quitter();
-      ecrireZone("\n");
-      for (const x of etat.attente.splice(0)) ecrireZone(`${x}\n`);
-      if (suite === "choisir-projet") poser("/projet ");
-      dessiner();
-    }
-
-    function surDonnees(donnees) {
-      for (const touche of lireTouches(donnees)) surTouche(touche);
-    }
-
-    function surTouche(touche) {
-      const cle = { name: touche.nom, ctrl: touche.ctrl === true };
-      const str = touche.texte;
-      if (etat.fin || etat.clavierCommande) return;
-      if (etat.occupe) {
-        if ((cle.ctrl && cle.name === "c") || cle.name === "escape") annulerCommande();
-        return;
-      }
-      if (cle.ctrl && cle.name === "c") {
-        if (etat.saisie) {
-          poser("");
-        } else if (Date.now() - etat.dernierCtrlC < 2000) {
-          return quitter();
-        } else {
-          etat.dernierCtrlC = Date.now();
-          etat.alerte = t("Ctrl+C encore pour quitter", "Ctrl+C again to quit");
-          setTimeout(() => {
-            etat.alerte = null;
-            dessiner();
-          }, 2000).unref?.();
-        }
-        return dessiner();
-      }
-      if (cle.ctrl && cle.name === "d") {
-        if (!etat.saisie) return quitter();
-        return;
-      }
-      if (cle.ctrl && cle.name === "l") {
-        ecrireZone("\x1b[2J\x1b[H");
-        etat.hauteur = 0;
-        return dessiner();
-      }
-      const menu = etat.menuFerme ? [] : etat.menu;
-      switch (cle.name) {
-        case "return":
-        case "enter": {
-          if (menu.length > 0) {
-            const e = menu[etat.sel];
-            // Une commande qui attend son argument (projet) se complète ; les autres partent.
-            if (e.argument) {
-              poser(`${e.valeur} `);
-              return dessiner();
-            }
-            if (!/\s/.test(etat.saisie) || etat.saisie.trim() !== e.valeur) return void soumettre(e.valeur);
-          }
-          return void soumettre(etat.saisie);
-        }
-        case "tab": {
-          if (menu.length > 0) {
-            const e = menu[etat.sel];
-            poser(/\s/.test(e.valeur) ? e.valeur : `${e.valeur} `);
-            if (/^\/?(projet|project) \S/.test(etat.saisie) || /^\/?open \S/.test(etat.saisie)) etat.menuFerme = true;
-            return dessiner();
-          }
-          if (etat.saisie && !/\s/.test(etat.saisie) && !etat.saisie.startsWith("/")) {
-            poser(`/${etat.saisie}`);
-            if (etat.menu.length === 1) poser(`${etat.menu[0].valeur} `);
-          } else if (!etat.saisie) {
-            poser("/");
-          }
-          return dessiner();
-        }
-        case "escape":
-          if (menu.length > 0) etat.menuFerme = true;
-          else poser("");
-          return dessiner();
-        case "up":
-          if (menu.length > 0) {
-            etat.sel = (etat.sel - 1 + menu.length) % menu.length;
-            return dessiner();
-          }
-          if (etat.histo.length === 0) return;
-          if (etat.iHisto === -1) {
-            etat.brouillon = etat.saisie;
-            etat.iHisto = etat.histo.length - 1;
-          } else etat.iHisto = Math.max(0, etat.iHisto - 1);
-          etat.saisie = etat.histo[etat.iHisto];
-          etat.curseur = etat.saisie.length;
-          etat.menuFerme = true;
-          return dessiner();
-        case "down":
-          if (menu.length > 0) {
-            etat.sel = (etat.sel + 1) % menu.length;
-            return dessiner();
-          }
-          if (etat.iHisto === -1) return;
-          etat.iHisto += 1;
-          if (etat.iHisto >= etat.histo.length) {
-            etat.iHisto = -1;
-            etat.saisie = etat.brouillon;
-          } else etat.saisie = etat.histo[etat.iHisto];
-          etat.curseur = etat.saisie.length;
-          etat.menuFerme = true;
-          return dessiner();
-        case "left":
-          etat.curseur = Math.max(0, etat.curseur - 1);
-          return dessiner();
-        case "right":
-          etat.curseur = Math.min(etat.saisie.length, etat.curseur + 1);
-          return dessiner();
-        case "home":
-          etat.curseur = 0;
-          return dessiner();
-        case "end":
-          etat.curseur = etat.saisie.length;
-          return dessiner();
-        case "backspace":
-          if (etat.curseur === 0) return;
-          poser(etat.saisie.slice(0, etat.curseur - 1) + etat.saisie.slice(etat.curseur), etat.curseur - 1);
-          return dessiner();
-        case "delete":
-          poser(etat.saisie.slice(0, etat.curseur) + etat.saisie.slice(etat.curseur + 1), etat.curseur);
-          return dessiner();
-        default:
-          break;
-      }
-      if (cle.ctrl) {
-        if (cle.name === "a") etat.curseur = 0;
-        else if (cle.name === "e") etat.curseur = etat.saisie.length;
-        else if (cle.name === "u") poser(etat.saisie.slice(etat.curseur), 0);
-        else if (cle.name === "k") poser(etat.saisie.slice(0, etat.curseur), etat.curseur);
-        else if (cle.name === "w") {
-          const avant = etat.saisie.slice(0, etat.curseur).replace(/\S+\s*$/, "");
-          poser(avant + etat.saisie.slice(etat.curseur), avant.length);
-        }
-        return dessiner();
-      }
-      if (typeof str === "string" && str.length > 0) {
-        if (str === "?" && !etat.saisie) {
-          effacer();
-          afficherAide();
-          ecrireZone("\n");
-          return dessiner();
-        }
-        poser(etat.saisie.slice(0, etat.curseur) + str + etat.saisie.slice(etat.curseur), etat.curseur + str.length);
-        return dessiner();
-      }
-    }
-
-    function surRedimension() {
-      if (!etat.occupe) dessiner();
-    }
+    quitter = quitterInterne;
 
     (async () => {
-      const attente = roue(t("Connexion à PostShip…", "Connecting to PostShip…"));
-      try {
-        const [, derniere] = await Promise.all([rafraichir(false), VERSION.startsWith("__") ? null : versionPubliee().catch(() => null)]);
-        if (derniere && plusRecente(VERSION, derniere)) etat.versionDispo = derniere;
-      } finally {
-        attente.fin();
-      }
-      etat.hauteur = 0;
-      accueil();
-      etat.pret = true;
       entree.setRawMode?.(true);
       entree.resume();
+      const impose = process.env.POSTSHIP_THEME || config.theme;
+      if (impose === "clair" || impose === "sombre") definirTheme(impose);
+      else definirTheme((detecter ? await detecterTheme(entree, ecrireEcran) : null) ?? "neutre");
+      process.on("exit", restaurer);
+      ecrireEcran("\x1b[?1049h\x1b[?25l\x1b[2J");
       entree.on("data", surDonnees);
       sortie.on?.("resize", surRedimension);
+      if (!VERSION.startsWith("__")) {
+        versionPubliee()
+          .then((v) => {
+            if (v && plusRecente(VERSION, v)) {
+              e.versionDispo = v;
+              dessiner();
+            }
+          })
+          .catch(() => undefined);
+      }
+      if (!lireJeton()) {
+        e.ecran = "connexion";
+        dessiner();
+      } else {
+        e.ecran = "chargement";
+        occuper(t("Lecture de vos projets…", "Reading your projects…"));
+        await rafraichir(false);
+        occuper(null);
+        if (e.ecran !== "connexion") {
+          if (!config.accueilFait) {
+            e.ecran = e.projets.length ? "projet-defaut" : "notifications";
+            e.choix = e.ecran === "notifications" ? 0 : Math.max(0, e.projets.findIndex((p) => p.id === e.projetDefaut) + 1);
+          } else versPrincipal();
+        }
+        dessiner();
+      }
       minuterie = setInterval(() => void rafraichir(true), intervalle);
       minuterie.unref?.();
-      dessiner();
-    })().catch((e) => {
-      ecrireZone(`${peindre("red", masquer(e?.message ?? String(e)))}\n`);
-      quitter();
+    })().catch((err) => {
+      quitterInterne(null);
+      origines.error(masquer(err?.message ?? String(err)));
     });
   });
-}
-
-// ---- navigateur.mjs
-// Ouvrir une adresse dans le navigateur, sans dépendance : `start` sur
-// Windows, `open` sur macOS, `xdg-open` ailleurs. Rend false quand rien
-// n'a pu être lancé (serveur, conteneur) : l'appelant affiche l'adresse.
-// POSTSHIP_NO_BROWSER=1 : n'ouvre jamais rien (scripts, tests, SSH).
-
-
-function ouvrirNavigateur(url) {
-  if (process.env.POSTSHIP_NO_BROWSER) return false;
-  try {
-    const p =
-      process.platform === "win32"
-        ? spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true, windowsHide: true })
-        : process.platform === "darwin"
-          ? spawn("open", [url], { stdio: "ignore", detached: true })
-          : spawn("xdg-open", [url], { stdio: "ignore", detached: true });
-    p.on("error", () => {});
-    p.unref();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** « MacBook-de-Camille » → « MacBook de Camille » ; le nom de la machine, lisible. */
-function nomMachine() {
-  return hostname().replace(/\.local$/i, "").replace(/[-_]+/g, " ").trim().slice(0, 80) || "cette machine";
 }
 
 // ---- commands/check.mjs
@@ -1919,49 +2964,6 @@ async function check(args) {
   if (typeof fichierJunit === "string" && fichierJunit) writeFileSync(fichierJunit, junit(resultats));
 
   return code;
-}
-
-// ---- commands/lecture.mjs
-// Ce que les commandes de lecture partagent : le projet requis, la sortie
-// JSON, le verdict d'un ship. Aucune ne consomme le quota de vérifications.
-
-
-
-function projetRequis(args) {
-  const id = lireProjet(une(args.project));
-  if (!id) throw new ErreurCli(t("--project manquant (ou ./.postship.json, ou POSTSHIP_PROJECT).", "--project missing (or ./.postship.json, or POSTSHIP_PROJECT)."), 2);
-  return id;
-}
-
-function sortieJson(args, payload) {
-  if (args.json !== true) return false;
-  console.log(JSON.stringify(payload, null, 2));
-  return true;
-}
-
-function lireShip(payload) {
-  return payload?.lastShip ?? null;
-}
-
-/** 1 si le ship a échoué ou si son score est sous le seuil, 0 sinon. */
-function codeDuShip(dernier, minScore) {
-  if (dernier.outcome === "fail" || dernier.outcome === "error") return 1;
-  if (minScore !== null && typeof dernier.score === "number" && dernier.score < minScore) return 1;
-  return 0;
-}
-
-/** La ligne d'un ship : « dernier ship  vercel  a1b2c3d  il y a 2 h  ✓ pass  92 ━━━━━━━━━─ ». */
-function ligneShip(ship, libelle = t("dernier ship", "last ship")) {
-  return [
-    libelle ? peindre("dim", libelle) : "",
-    ship.provider ?? "—",
-    peindre("bold", String(ship.sha ?? "").slice(0, 7) || "—"),
-    relatif(ship.at),
-    verdict(ship.outcome).trim(),
-    ship.score !== null && ship.score !== undefined ? jauge(ship.score) : "",
-  ]
-    .filter(Boolean)
-    .join("  ");
 }
 
 // ---- commands/projects.mjs
@@ -2124,7 +3126,9 @@ function shaDeHead(executer = executerGit) {
   throw new ErreurCli(t("--head : pas de dépôt git ici (git rev-parse HEAD a échoué).", "--head: no git repository here (git rev-parse HEAD failed)."), 2);
 }
 
-async function wait(args, { dormir = (ms) => new Promise((r) => setTimeout(r, ms)), maintenant = () => Date.now(), executer = executerGit } = {}) {
+async function wait(args, options = {}) {
+  // `progression: false` : l'interface plein écran montre sa propre roue ; pas une ligne par relevé.
+  const { dormir = (ms) => new Promise((r) => setTimeout(r, ms)), maintenant = () => Date.now(), executer = executerGit, progression = true } = /** @type {{ dormir?: (ms: number) => Promise<unknown>, maintenant?: () => number, executer?: (cmd: string, liste: string[]) => string, progression?: boolean }} */ (options);
   const id = lireProjet(une(args.project));
   if (!id) throw new ErreurCli(t("--project manquant.", "--project missing."), 2);
   const timeoutS = entier(args.timeout) ?? 600;
@@ -2165,7 +3169,7 @@ async function wait(args, { dormir = (ms) => new Promise((r) => setTimeout(r, ms
       }
       const etape = ship && (!sha || String(ship.sha ?? "").startsWith(sha)) ? t("vérification en cours", "check running") : t("en attente du déploiement", "waiting for the deploy");
       if (attente?.actif) attente.maj(`${cible} : ${etape} · ${duree(ecoule)} ${peindre("dim", t("(Ctrl+C pour arrêter)", "(Ctrl+C to stop)"))}`);
-      else if (!json) ecrire(peindre("dim", `  ${symbole("skip")} ${t("en attente du ship…", "waiting for the ship…")}`));
+      else if (!json && progression) ecrire(peindre("dim", `  ${symbole("skip")} ${t("en attente du ship…", "waiting for the ship…")}`));
       await dormir(POLL_MS);
     }
   } finally {
@@ -2477,122 +3481,6 @@ async function gate(args) {
     ecrire(peindre(conclusion[0], conclusion[1]));
   }
   return code;
-}
-
-// ---- commands/login.mjs
-// `postship login` — connecter la CLI au compte, comme on connecte un
-// téléviseur : un code court à comparer, une page qui autorise, la clé
-// qui arrive. La clé s'écrit dans ~/.config/postship/config.json (0600),
-// jamais ailleurs.
-
-
-
-
-
-
-function lireConfig() {
-  try {
-    return JSON.parse(readFileSync(cheminConfig(), "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function ecrireConfig(valeurs) {
-  const chemin = cheminConfig();
-  mkdirSync(dirname(chemin), { recursive: true });
-  writeFileSync(chemin, JSON.stringify(valeurs, null, 2) + "\n");
-  try {
-    chmodSync(chemin, 0o600);
-  } catch {
-    // Windows : pas de mode POSIX ; le dossier utilisateur fait office.
-  }
-  return chemin;
-}
-
-async function login(args, { dormir = (ms) => new Promise((r) => setTimeout(r, ms)), maintenant = () => Date.now() } = {}) {
-  const machine = typeof une(args.machine) === "string" ? une(args.machine) : nomMachine();
-  const r = await appel("POST", "/api/cli/autoriser/demander", { corps: { machine }, timeoutMs: 15_000 });
-  if (!r.ok || !r.payload?.device_code) {
-    throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
-  }
-  const { device_code: deviceCode, user_code: userCode, verification_url_complete: lienComplet, verification_url: lien, expires_in: expiresIn, interval } = r.payload;
-
-  ecrire();
-  ecrire(`  ${marque("login")}`);
-  ecrire();
-  const [libCode, libLien] = [t("Le code de ce terminal", "This terminal's code"), t("À ouvrir", "Open")];
-  const col = Math.max(libCode.length, libLien.length) + 3;
-  ecrire(`  ${libCode.padEnd(col)}${peindre("signal", peindre("bold", userCode))}`);
-  ecrire(`  ${libLien.padEnd(col)}${lienComplet ?? lien}`);
-  ecrire();
-  ecrire(peindre("dim", `  ${t("Vérifiez que le navigateur affiche le même code, puis « Autoriser ce terminal ».", "Check that the browser shows the same code, then “Authorize this terminal”.")}`));
-  ecrire();
-  if (args["no-browser"] !== true && process.stdout.isTTY) {
-    if (!ouvrirNavigateur(lienComplet ?? lien)) ecrire(peindre("dim", `  ${t("Aucun navigateur ici : copiez l'adresse ailleurs.", "No browser here: copy the address elsewhere.")}`));
-  }
-  const attente = roue(t("En attente de l'autorisation dans le navigateur… (dix minutes au plus)", "Waiting for the authorization in the browser… (ten minutes at most)"));
-
-  const fin = maintenant() + (Number(expiresIn) || 600) * 1000;
-  const pas = Math.max(2, Number(interval) || 3) * 1000;
-  try {
-    for (;;) {
-      await dormir(pas);
-      const j = await appel("POST", "/api/cli/autoriser/jeton", { corps: { device_code: deviceCode }, timeoutMs: 15_000 });
-      if (j.ok && j.payload?.token) {
-        attente.fin();
-        const config = lireConfig();
-        const chemin = ecrireConfig({ ...config, token: j.payload.token, prefix: j.payload.prefix, machine, api: baseUrl(), connecteLe: new Date().toISOString() });
-        ecrire(`  ${symbole("pass")} ${peindre("bold", t("Terminal connecté", "Terminal connected"))}`);
-        ecrire(peindre("dim", `    ${t("clé {0}… · {1}", "key {0}… · {1}", j.payload.prefix, chemin)}`));
-        if (process.env.POSTSHIP_TOKEN) ecrire(peindre("yellow", `  ${t("POSTSHIP_TOKEN est posé dans l'environnement et passe devant ce fichier.", "POSTSHIP_TOKEN is set in the environment and takes precedence over this file.")}`));
-        ecrire();
-        const ensuite = t("Et maintenant", "What next");
-        ecrire(`  ${ensuite}   postship ${peindre("dim", t("— le tableau de bord", "— the dashboard"))}`);
-        ecrire(`  ${" ".repeat(ensuite.length)}   postship init ${peindre("dim", t("— lier ce dossier à un projet", "— link this folder to a project"))}`);
-        ecrire();
-        return 0;
-      }
-      if (j.status === 410) throw new ErreurCli(t("Le code a expiré (dix minutes). Relancez postship login.", "The code expired (ten minutes). Run postship login again."), 2);
-      if (j.status !== 428) throw new ErreurCli(j.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", j.status), 2);
-      if (maintenant() >= fin) throw new ErreurCli(t("Le code a expiré (dix minutes). Relancez postship login.", "The code expired (ten minutes). Run postship login again."), 2);
-    }
-  } finally {
-    attente.fin();
-  }
-}
-
-/** `postship logout` : révoque la clé de la config (pas celle de l'environnement), puis l'efface. */
-async function logout() {
-  const config = lireConfig();
-  if (!config.token) {
-    if (process.env.POSTSHIP_TOKEN) throw new ErreurCli(t("La clé vient de POSTSHIP_TOKEN, pas de la CLI : retirez la variable, ou révoquez la clé dans Compte → API.", "The key comes from POSTSHIP_TOKEN, not from the CLI: unset the variable, or revoke the key in Account → API."), 2);
-    throw new ErreurCli(t("Aucune clé enregistrée par la CLI.", "No key saved by the CLI."), 2);
-  }
-  let revoquee = true;
-  try {
-    // La clé de la config, explicitement : même si POSTSHIP_TOKEN est posé.
-    const r = await appel("POST", "/api/cli/deconnecter", { jeton: config.token, timeoutMs: 15_000 });
-    revoquee = r.ok || r.status === 401;
-  } catch {
-    revoquee = false;
-  }
-  const { token: _t, prefix: _p, machine: _m, connecteLe: _c, ...reste } = config;
-  void _t;
-  void _p;
-  void _m;
-  void _c;
-  ecrireConfig(reste);
-  if (!revoquee) throw new ErreurCli(t("Config locale effacée, mais PostShip est injoignable : révoquez la clé dans Compte → API.", "Local config cleared, but PostShip is unreachable: revoke the key in Account → API."), 2);
-  ecrire(`${symbole("pass")} ${t("Déconnecté : la clé est révoquée et retirée de {0}.", "Signed out: the key is revoked and removed from {0}.", cheminConfig())}`);
-  return 0;
-}
-
-/** Le jeton effectif, pour `status` : d'où il vient. */
-function origineJeton() {
-  if (process.env.POSTSHIP_TOKEN) return "env";
-  if (lireJeton()) return "config";
-  return null;
 }
 
 // ---- commands/status.mjs
@@ -2952,7 +3840,7 @@ async function uninstall(args, options = {}) {
 // doit pas y ajouter un arbre de modules. Node 18+ (fetch natif).
 //
 //   postship login                      # connecte ce terminal au compte
-//   postship                            # la console interactive (dans un terminal)
+//   postship                            # l'interface plein écran (dans un terminal)
 //   postship check exemple.fr           # vérifie, compte dans le quota
 //   git push && postship wait --head    # le verdict du commit qu'on pousse
 //
@@ -3040,7 +3928,7 @@ function aide(commande) {
   ecrire();
   ecrire(`  ${marque(peindre("dim", `${VERSION.startsWith("__") ? "dev" : VERSION} · ${l === "fr" ? "vos déploiements, vérifiés depuis le terminal" : "your deploys, checked from the terminal"}`))}`);
   ecrire();
-  ecrire(l === "fr" ? "  postship               la console interactive (dans un terminal)" : "  postship               the interactive console (in a terminal)");
+  ecrire(l === "fr" ? "  postship               l'interface plein écran (dans un terminal)" : "  postship               the full-screen interface (in a terminal)");
   ecrire(l === "fr" ? "  postship <commande> [options]" : "  postship <command> [options]");
   for (const groupe of GROUPES) {
     ecrire();
@@ -3081,17 +3969,19 @@ async function main(argv = process.argv.slice(2)) {
     ecrire(VERSION.startsWith("__") ? "dev" : VERSION);
     return 0;
   }
-  // `postship` seul, dans un terminal : la console interactive. Hors
+  // `postship` seul, dans un terminal : l'interface plein écran. Hors
   // terminal (script, tube, CI), l'aide et le code 2, comme avant : un
-  // appel sans commande y est une erreur.
+  // appel sans commande y est une erreur. Une commande qui a besoin du
+  // terminal (update, uninstall, init…) quitte l'interface puis s'exécute.
   if (!commande && process.stdout.isTTY && process.stdin.isTTY && process.env.CI !== "true" && args.help !== true) {
-    return lancerConsole({
+    const suite = await lancerInterface({
       ...FONCTIONS,
       help: async (a) => {
         aide(a._[1]);
         return 0;
       },
     });
+    return suite ? main(suite) : 0;
   }
   if (!commande || commande === "help" || commande === "--help") {
     aide(args._[1]);
