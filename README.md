@@ -16,4 +16,4 @@ Codes de sortie : `0` tout est passé · `1` le site a un problème · `2` l'out
 
 Le fichier `postship.mjs` est la CLI officielle assemblée en un seul fichier (`npm i -g postship` ailleurs) : `node postship.mjs help`.
 
-Documentation : https://postship.fr/docs/cli-ci
+Documentation : https://postship.fr/docs/cli#cli-ci
