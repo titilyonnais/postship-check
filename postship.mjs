@@ -2,7 +2,7 @@
 // PostShip CLI — fichier autonome assemblé par scripts/cli-bundle.mjs.
 // Ne pas éditer : la source est src/cli/. Node 18+, aucune dépendance.
 import { pathToFileURL } from "node:url";
-import { readFileSync, mkdirSync, writeFileSync, chmodSync, readdirSync, realpathSync, rmdirSync, rmSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, chmodSync, renameSync, readdirSync, realpathSync, rmdirSync, rmSync } from "node:fs";
 import { homedir, release, hostname } from "node:os";
 import { join, dirname } from "node:path";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -15,7 +15,7 @@ import { spawn, execFileSync, spawnSync } from "node:child_process";
 // Chaque commande : ce qu'elle fait, ses options expliquées une à une,
 // deux exemples au moins, ce que le code de sortie veut dire, et ce
 // qu'on vérifie quand ça ne marche pas.
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 
 /** @typedef {{ fr: string, en: string }} T */
 
@@ -33,19 +33,17 @@ const COMMANDES = {
   login: {
     resume: { fr: "Connecte la CLI à votre compte, depuis le navigateur.", en: "Connect the CLI to your account, from the browser." },
     quota: false,
-    usage: "postship login [--machine <nom>] [--no-browser] [--qr]",
+    usage: "postship login [--machine <nom>] [--no-browser]",
     description: {
-      fr: "Affiche un code de huit caractères et ouvre postship.fr/cli/autoriser. Vous vous connectez (ou vous l'êtes déjà), vous comparez le code à celui du terminal, vous autorisez. La CLI reçoit une clé d'API à votre nom — « CLI · <machine> », visible et révocable dans Compte → API, qui expire après 90 jours sans usage — et l'écrit dans ~/.config/postship/config.json (mode 0600). Dix minutes pour tout faire ; le code ne sert qu'une fois. Avec --qr, l'adresse s'affiche aussi en QR code, à scanner avec le téléphone. Dans l'interface (postship tapé seul), quatre façons de se connecter : le navigateur, un QR code, votre email et un code, ou une clé d'API collée.",
-      en: "Shows an eight-character code and opens postship.fr/cli/autoriser. You sign in (or already are), compare the code with the terminal's, and authorize. The CLI receives an API key in your name — “CLI · <machine>”, visible and revocable in Account → API, expiring after 90 days without use — and writes it to ~/.config/postship/config.json (mode 0600). Ten minutes to do it all; the code is single-use. With --qr, the address also shows as a QR code, to scan with your phone. In the interface (postship typed alone), four ways to sign in: the browser, a QR code, your email and a code, or a pasted API key.",
+      fr: "Affiche un code de huit caractères et ouvre postship.fr/cli/autoriser. Vous vous connectez (ou vous l'êtes déjà), vous comparez le code à celui du terminal, vous autorisez. La CLI reçoit une clé d'API à votre nom — « CLI · <machine> », visible et révocable dans Compte → API, qui expire après 90 jours sans usage — et l'écrit dans ~/.config/postship/config.json (mode 0600). Dix minutes pour tout faire ; le code ne sert qu'une fois. Dans l'interface (postship tapé seul), deux façons de se connecter : le navigateur, ou une clé d'API collée.",
+      en: "Shows an eight-character code and opens postship.fr/cli/autoriser. You sign in (or already are), compare the code with the terminal's, and authorize. The CLI receives an API key in your name — “CLI · <machine>”, visible and revocable in Account → API, expiring after 90 days without use — and writes it to ~/.config/postship/config.json (mode 0600). Ten minutes to do it all; the code is single-use. In the interface (postship typed alone), two ways to sign in: the browser, or a pasted API key.",
     },
     options: [
       { nom: "--machine", valeur: "<nom>", texte: { fr: "Le nom de cet appareil dans Compte → API (par défaut : le nom de la machine).", en: "This device's name in Account → API (default: the machine's hostname)." } },
       { nom: "--no-browser", texte: { fr: "N'ouvre pas le navigateur : affiche seulement l'adresse et le code, pour une machine distante.", en: "Do not open the browser: only print the address and the code, for a remote machine." } },
-      { nom: "--qr", texte: { fr: "Affiche l'adresse en QR code, à scanner avec le téléphone (le navigateur ne s'ouvre pas).", en: "Show the address as a QR code, to scan with your phone (the browser does not open)." } },
     ],
     exemples: [
       { cmd: "postship login", texte: { fr: "Sur votre poste : le navigateur s'ouvre, vous autorisez, c'est fini.", en: "On your computer: the browser opens, you authorize, done." } },
-      { cmd: "postship login --qr", texte: { fr: "En SSH ou sans navigateur : scannez, autorisez depuis le téléphone.", en: "Over SSH or without a browser: scan, authorize from your phone." } },
       { cmd: "postship login --no-browser --machine \"serveur de build\"", texte: { fr: "Sur un serveur en SSH : copiez l'adresse dans un navigateur ailleurs.", en: "On a server over SSH: paste the address into a browser elsewhere." } },
     ],
     sortie: { fr: "0 clé reçue et écrite · 2 refusé, expiré (dix minutes), ou PostShip injoignable.", en: "0 key received and written · 2 refused, expired (ten minutes), or PostShip unreachable." },
@@ -381,6 +379,45 @@ function baseUrl() {
   return (process.env.POSTSHIP_API || process.env.POSTSHIP_API_URL || "https://postship.fr").replace(/\/+$/, "");
 }
 
+/**
+ * La clé ne part qu'en https (audit du 28 sept. 2026) : POSTSHIP_API pointé
+ * sur une adresse en http l'aurait envoyée en clair sur le réseau. Seule
+ * exception, la machine elle-même (localhost), pour développer.
+ */
+function adresseSure(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "https:") return true;
+    return u.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+// Les caractères de contrôle : C0 (sauf tabulation et saut de ligne), DEL, C1.
+const CONTROLES = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
+
+/**
+ * Ce qui vient du serveur ne pilote jamais le terminal (audit du 28 sept.
+ * 2026). Le détail d'une vérification reprend des morceaux du site
+ * vérifié — un titre, un en-tête — : une séquence d'échappement glissée
+ * là changerait le titre de la fenêtre, écrirait dans le presse-papiers
+ * (OSC 52) ou maquillerait un lien. Chaque chaîne reçue perd ses
+ * caractères de contrôle avant d'être lue par une commande.
+ */
+function nettoyerTexte(valeur) {
+  return String(valeur).replace(CONTROLES, "");
+}
+
+function nettoyerDonnees(valeur, profondeur = 0) {
+  if (typeof valeur === "string") return nettoyerTexte(valeur);
+  if (profondeur > 20 || valeur === null || typeof valeur !== "object") return valeur;
+  if (Array.isArray(valeur)) return valeur.map((v) => nettoyerDonnees(v, profondeur + 1));
+  const sortie = {};
+  for (const [cle, v] of Object.entries(valeur)) sortie[nettoyerTexte(cle)] = nettoyerDonnees(v, profondeur + 1);
+  return sortie;
+}
+
 function cheminConfig() {
   return process.env.POSTSHIP_CONFIG || join(homedir(), ".config", "postship", "config.json");
 }
@@ -435,6 +472,9 @@ class ErreurCli extends Error {
  * ou 429 vaut 2 — c'est toujours 2, mais avec la phrase du serveur.
  */
 async function appel(methode, chemin, { jeton, corps, timeoutMs = 60_000 } = {}) {
+  if (!adresseSure(baseUrl())) {
+    throw new ErreurCli(t("POSTSHIP_API doit être une adresse en https : la clé ne part jamais en clair.", "POSTSHIP_API must be an https address: the key never travels in clear text."), 2);
+  }
   const controleur = new AbortController();
   const minuterie = setTimeout(() => controleur.abort(), timeoutMs);
   try {
@@ -448,7 +488,7 @@ async function appel(methode, chemin, { jeton, corps, timeoutMs = 60_000 } = {})
       body: corps ? JSON.stringify(corps) : undefined,
       signal: controleur.signal,
     });
-    const payload = await reponse.json().catch(() => null);
+    const payload = nettoyerDonnees(await reponse.json().catch(() => null));
     return { status: reponse.status, ok: reponse.ok, payload };
   } catch (erreur) {
     if (erreur?.name === "AbortError") throw new ErreurCli(t("Délai dépassé ({0} s) en joignant PostShip.", "Timed out ({0} s) reaching PostShip.", Math.round(timeoutMs / 1000)), 2);
@@ -898,7 +938,7 @@ function notifierBureau(titre, texte) {
         ? spawn("osascript", ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", t1, t2], { stdio: "ignore", detached: true })
         : process.platform === "win32"
           ? spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", TOAST_WINDOWS], { stdio: "ignore", detached: true, windowsHide: true, env: { ...process.env, POSTSHIP_NOTIF_TITRE: t1, POSTSHIP_NOTIF_TEXTE: t2 } })
-          : spawn("notify-send", ["--app-name=PostShip", t1, t2], { stdio: "ignore", detached: true });
+          : spawn("notify-send", ["--app-name=PostShip", "--", t1, t2], { stdio: "ignore", detached: true });
     p.on("error", () => {});
     p.unref();
     return true;
@@ -908,18 +948,30 @@ function notifierBureau(titre, texte) {
 }
 
 // ---- navigateur.mjs
-// Ouvrir une adresse dans le navigateur, sans dépendance : `start` sur
-// Windows, `open` sur macOS, `xdg-open` ailleurs. Rend false quand rien
-// n'a pu être lancé (serveur, conteneur) : l'appelant affiche l'adresse.
+// Ouvrir une adresse dans le navigateur, sans dépendance : le gestionnaire
+// d'URL de Windows, `open` sur macOS, `xdg-open` ailleurs. Rend false quand
+// rien n'a pu être lancé (serveur, conteneur) : l'appelant affiche l'adresse.
 // POSTSHIP_NO_BROWSER=1 : n'ouvre jamais rien (scripts, tests, SSH).
+//
+// Jamais par `cmd /c start` (audit du 28 sept. 2026) : cmd relit la ligne,
+// et une adresse venue du serveur contenant « & » y lançait une commande.
+// Seules les adresses http(s) passent, et sans shell.
 
 
 function ouvrirNavigateur(url) {
   if (process.env.POSTSHIP_NO_BROWSER) return false;
+  let adresse;
+  try {
+    adresse = new URL(String(url));
+  } catch {
+    return false;
+  }
+  if (adresse.protocol !== "https:" && adresse.protocol !== "http:") return false;
+  url = adresse.toString();
   try {
     const p =
       process.platform === "win32"
-        ? spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true, windowsHide: true })
+        ? spawn("rundll32", ["url.dll,FileProtocolHandler", url], { stdio: "ignore", detached: true, windowsHide: true })
         : process.platform === "darwin"
           ? spawn("open", [url], { stdio: "ignore", detached: true })
           : spawn("xdg-open", [url], { stdio: "ignore", detached: true });
@@ -934,287 +986,6 @@ function ouvrirNavigateur(url) {
 /** « MacBook-de-Camille » → « MacBook de Camille » ; le nom de la machine, lisible. */
 function nomMachine() {
   return hostname().replace(/\.local$/i, "").replace(/[-_]+/g, " ").trim().slice(0, 80) || "cette machine";
-}
-
-// ---- qr.mjs
-// Un QR code sans dépendance (28 sept. 2026), pour se connecter depuis le
-// téléphone : la CLI dessine l'adresse d'autorisation, on la scanne, on
-// autorise. Mode octet, correction d'erreur M (15 %), versions 1 à 10 —
-// assez pour une adresse de 200 caractères. L'algorithme suit la norme
-// ISO/IEC 18004, dans l'ordre où la décrit l'implémentation de référence
-// de Project Nayuki (MIT) : motifs fixes, données et Reed-Solomon,
-// placement en zigzag, puis le masque au plus faible score de pénalité.
-
-// Correction M : octets de correction par bloc, et nombre de blocs, versions 1 à 10.
-const CORRECTION_PAR_BLOC_M = [0, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26];
-const BLOCS_M = [0, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5];
-const FORMAT_M = 0; // L=1, M=0, Q=3, H=2
-
-function modulesDeDonnees(version) {
-  let n = (16 * version + 128) * version + 64;
-  if (version >= 2) {
-    const alignements = Math.floor(version / 7) + 2;
-    n -= (25 * alignements - 10) * alignements - 55;
-    if (version >= 7) n -= 36;
-  }
-  return n;
-}
-
-function octetsDeDonnees(version) {
-  return Math.floor(modulesDeDonnees(version) / 8) - CORRECTION_PAR_BLOC_M[version] * BLOCS_M[version];
-}
-
-// Le corps de Galois GF(256), polynôme 0x11D.
-function multiplierGf(x, y) {
-  let z = 0;
-  for (let i = 7; i >= 0; i--) {
-    z = (z << 1) ^ ((z >>> 7) * 0x11d);
-    z ^= ((y >>> i) & 1) * x;
-  }
-  return z & 0xff;
-}
-
-function diviseurRs(degre) {
-  const r = new Array(degre - 1).fill(0).concat([1]);
-  let racine = 1;
-  for (let i = 0; i < degre; i++) {
-    for (let j = 0; j < r.length; j++) {
-      r[j] = multiplierGf(r[j], racine);
-      if (j + 1 < r.length) r[j] ^= r[j + 1];
-    }
-    racine = multiplierGf(racine, 0x02);
-  }
-  return r;
-}
-
-function resteRs(donnees, diviseur) {
-  const r = diviseur.map(() => 0);
-  for (const b of donnees) {
-    const facteur = b ^ r.shift();
-    r.push(0);
-    diviseur.forEach((c, i) => (r[i] ^= multiplierGf(c, facteur)));
-  }
-  return r;
-}
-
-function positionsAlignement(version, taille) {
-  if (version === 1) return [];
-  const n = Math.floor(version / 7) + 2;
-  const pas = Math.ceil((version * 4 + 4) / (n * 2 - 2)) * 2;
-  const r = [6];
-  for (let pos = taille - 7; r.length < n; pos -= pas) r.splice(1, 0, pos);
-  return r;
-}
-
-/** La matrice d'un texte : un tableau de lignes de booléens (true = module sombre). */
-function matriceQr(texte) {
-  const octets = [...new TextEncoder().encode(String(texte))];
-  let version = 1;
-  for (; version <= 10; version++) {
-    const bitsCompte = version <= 9 ? 8 : 16;
-    if (4 + bitsCompte + octets.length * 8 <= octetsDeDonnees(version) * 8) break;
-  }
-  if (version > 10) throw new Error("Texte trop long pour un QR code de version 10.");
-  const taille = version * 4 + 17;
-
-  // Les bits de données : mode octet, longueur, octets, terminaison, bourrage.
-  const bits = [];
-  const pousser = (valeur, n) => {
-    for (let i = n - 1; i >= 0; i--) bits.push((valeur >>> i) & 1);
-  };
-  pousser(0b0100, 4);
-  pousser(octets.length, version <= 9 ? 8 : 16);
-  for (const o of octets) pousser(o, 8);
-  const capacite = octetsDeDonnees(version) * 8;
-  pousser(0, Math.min(4, capacite - bits.length));
-  pousser(0, (8 - (bits.length % 8)) % 8);
-  for (let bourrage = 0xec; bits.length < capacite; bourrage ^= 0xec ^ 0x11) pousser(bourrage, 8);
-  const donnees = [];
-  for (let i = 0; i < bits.length; i += 8) donnees.push(bits.slice(i, i + 8).reduce((a, b) => (a << 1) | b, 0));
-
-  // Les blocs, leur correction, l'entrelacement.
-  const nbBlocs = BLOCS_M[version];
-  const correction = CORRECTION_PAR_BLOC_M[version];
-  const bruts = Math.floor(modulesDeDonnees(version) / 8);
-  const courts = nbBlocs - (bruts % nbBlocs);
-  const longueurCourte = Math.floor(bruts / nbBlocs);
-  const diviseur = diviseurRs(correction);
-  const blocs = [];
-  for (let i = 0, k = 0; i < nbBlocs; i++) {
-    const d = donnees.slice(k, k + longueurCourte - correction + (i < courts ? 0 : 1));
-    k += d.length;
-    const ec = resteRs(d, diviseur);
-    if (i < courts) d.push(0);
-    blocs.push(d.concat(ec));
-  }
-  const mots = [];
-  for (let i = 0; i < blocs[0].length; i++) {
-    for (let j = 0; j < blocs.length; j++) if (i !== longueurCourte - correction || j >= courts) mots.push(blocs[j][i]);
-  }
-
-  // Les motifs fixes.
-  const modules = Array.from({ length: taille }, () => new Array(taille).fill(false));
-  const fixe = Array.from({ length: taille }, () => new Array(taille).fill(false));
-  const poser = (x, y, sombre) => {
-    modules[y][x] = sombre;
-    fixe[y][x] = true;
-  };
-  for (let i = 0; i < taille; i++) {
-    poser(6, i, i % 2 === 0);
-    poser(i, 6, i % 2 === 0);
-  }
-  for (const [cx, cy] of [
-    [3, 3],
-    [taille - 4, 3],
-    [3, taille - 4],
-  ]) {
-    for (let dy = -4; dy <= 4; dy++) {
-      for (let dx = -4; dx <= 4; dx++) {
-        const x = cx + dx;
-        const y = cy + dy;
-        const d = Math.max(Math.abs(dx), Math.abs(dy));
-        if (x >= 0 && x < taille && y >= 0 && y < taille) poser(x, y, d !== 2 && d !== 4);
-      }
-    }
-  }
-  const pos = positionsAlignement(version, taille);
-  for (let i = 0; i < pos.length; i++) {
-    for (let j = 0; j < pos.length; j++) {
-      if ((i === 0 && j === 0) || (i === 0 && j === pos.length - 1) || (i === pos.length - 1 && j === 0)) continue;
-      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) poser(pos[i] + dx, pos[j] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
-    }
-  }
-  const poserFormat = (masque) => {
-    const d = (FORMAT_M << 3) | masque;
-    let reste = d;
-    for (let i = 0; i < 10; i++) reste = (reste << 1) ^ ((reste >>> 9) * 0x537);
-    const f = ((d << 10) | reste) ^ 0x5412;
-    const bit = (i) => ((f >>> i) & 1) !== 0;
-    for (let i = 0; i <= 5; i++) poser(8, i, bit(i));
-    poser(8, 7, bit(6));
-    poser(8, 8, bit(7));
-    poser(7, 8, bit(8));
-    for (let i = 9; i < 15; i++) poser(14 - i, 8, bit(i));
-    for (let i = 0; i < 8; i++) poser(taille - 1 - i, 8, bit(i));
-    for (let i = 8; i < 15; i++) poser(8, taille - 15 + i, bit(i));
-    poser(8, taille - 8, true);
-  };
-  poserFormat(0);
-  if (version >= 7) {
-    let reste = version;
-    for (let i = 0; i < 12; i++) reste = (reste << 1) ^ ((reste >>> 11) * 0x1f25);
-    const v = (version << 12) | reste;
-    for (let i = 0; i < 18; i++) {
-      const sombre = ((v >>> i) & 1) !== 0;
-      const a = taille - 11 + (i % 3);
-      const b = Math.floor(i / 3);
-      poser(a, b, sombre);
-      poser(b, a, sombre);
-    }
-  }
-
-  // Les données, en zigzag de deux colonnes, de bas en haut puis de haut en bas.
-  let i = 0;
-  for (let droite = taille - 1; droite >= 1; droite -= 2) {
-    if (droite === 6) droite = 5;
-    for (let v = 0; v < taille; v++) {
-      for (let j = 0; j < 2; j++) {
-        const x = droite - j;
-        const montant = ((droite + 1) & 2) === 0;
-        const y = montant ? taille - 1 - v : v;
-        if (!fixe[y][x] && i < mots.length * 8) {
-          modules[y][x] = ((mots[i >>> 3] >>> (7 - (i & 7))) & 1) !== 0;
-          i++;
-        }
-      }
-    }
-  }
-
-  // Le masque : les huit sont essayés, le plus lisible gagne.
-  const MASQUES = [
-    (x, y) => (x + y) % 2 === 0,
-    (x, y) => y % 2 === 0,
-    (x) => x % 3 === 0,
-    (x, y) => (x + y) % 3 === 0,
-    (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0,
-    (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0,
-    (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0,
-    (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0,
-  ];
-  const appliquer = (m) => {
-    for (let y = 0; y < taille; y++) for (let x = 0; x < taille; x++) if (!fixe[y][x] && MASQUES[m](x, y)) modules[y][x] = !modules[y][x];
-  };
-  let meilleur = 0;
-  let score = Infinity;
-  for (let m = 0; m < 8; m++) {
-    appliquer(m);
-    poserFormat(m);
-    const s = penalite(modules);
-    if (s < score) {
-      score = s;
-      meilleur = m;
-    }
-    appliquer(m);
-  }
-  appliquer(meilleur);
-  poserFormat(meilleur);
-  return modules;
-}
-
-/** Le score de pénalité de la norme : séries, carrés, faux repères, équilibre. */
-function penalite(m) {
-  const n = m.length;
-  let s = 0;
-  const lignes = [];
-  for (let y = 0; y < n; y++) lignes.push(m[y]);
-  for (let x = 0; x < n; x++) lignes.push(m.map((l) => l[x]));
-  for (const l of lignes) {
-    let serie = 1;
-    for (let i = 1; i <= n; i++) {
-      if (i < n && l[i] === l[i - 1]) serie++;
-      else {
-        if (serie >= 5) s += serie - 2;
-        serie = 1;
-      }
-    }
-    const texte = `0000${l.map((b) => (b ? "1" : "0")).join("")}0000`;
-    for (const motif of ["00001011101", "10111010000"]) {
-      for (let k = texte.indexOf(motif); k !== -1; k = texte.indexOf(motif, k + 1)) s += 40;
-    }
-  }
-  for (let y = 0; y < n - 1; y++) for (let x = 0; x < n - 1; x++) if (m[y][x] === m[y][x + 1] && m[y][x] === m[y + 1][x] && m[y][x] === m[y + 1][x + 1]) s += 3;
-  const sombres = m.reduce((a, l) => a + l.filter(Boolean).length, 0);
-  const total = n * n;
-  s += (Math.ceil(Math.abs(sombres * 20 - total * 10) / total) - 1) * 10;
-  return s;
-}
-
-/**
- * Le QR en demi-blocs (▀ ▄ █), deux rangées de modules par ligne, avec sa
- * marge. Noir sur blanc forcé, quel que soit le thème du terminal : un
- * lecteur de QR code veut du contraste, pas nos couleurs.
- */
-function dessinerQr(texte, { marge = 2, couleurs = true, profondeur = 24 } = {}) {
-  const m = matriceQr(texte);
-  const n = m.length + marge * 2;
-  const sombre = (x, y) => {
-    const xx = x - marge;
-    const yy = y - marge;
-    return yy >= 0 && yy < m.length && xx >= 0 && xx < m.length && m[yy][xx];
-  };
-  const debut = !couleurs ? "" : profondeur === 24 ? "\x1b[38;2;0;0;0;48;2;255;255;255m" : "\x1b[30;107m";
-  const fin = couleurs ? "\x1b[0m" : "";
-  const lignes = [];
-  for (let y = 0; y < n; y += 2) {
-    let l = "";
-    for (let x = 0; x < n; x++) {
-      const haut = sombre(x, y);
-      const bas = y + 1 < n && sombre(x, y + 1);
-      l += haut && bas ? "█" : haut ? "▀" : bas ? "▄" : " ";
-    }
-    lignes.push(`${debut}${l}${fin}`);
-  }
-  return lignes;
 }
 
 // ---- console.mjs
@@ -1394,9 +1165,9 @@ function lireHistorique() {
 
 function ecrireHistorique(lignes) {
   try {
-    mkdirSync(dirname(cheminHistorique()), { recursive: true });
-    // Jamais une clé dans l'historique, même collée par erreur.
-    writeFileSync(cheminHistorique(), lignes.slice(-HISTORIQUE_MAX).map(masquer).join("\n") + "\n");
+    mkdirSync(dirname(cheminHistorique()), { recursive: true, mode: 0o700 });
+    // Jamais une clé dans l'historique, même collée par erreur ; lisible du seul propriétaire.
+    writeFileSync(cheminHistorique(), lignes.slice(-HISTORIQUE_MAX).map(masquer).join("\n") + "\n", { mode: 0o600 });
   } catch {
     // pas grave : l'historique est un confort
   }
@@ -1413,7 +1184,6 @@ function ecrireHistorique(lignes) {
 
 
 
-
 function lireConfig() {
   try {
     return JSON.parse(readFileSync(cheminConfig(), "utf8"));
@@ -1422,15 +1192,24 @@ function lireConfig() {
   }
 }
 
+/**
+ * La configuration (la clé) s'écrit lisible du seul propriétaire dès sa
+ * création — 0600, dossier 0700 —, pas une fois écrite (audit du 28 sept.
+ * 2026) : entre les deux, n'importe quel compte de la machine pouvait la
+ * lire. Écrite à côté puis renommée : un arrêt au milieu ne laisse jamais
+ * une configuration tronquée.
+ */
 function ecrireConfig(valeurs) {
   const chemin = cheminConfig();
-  mkdirSync(dirname(chemin), { recursive: true });
-  writeFileSync(chemin, JSON.stringify(valeurs, null, 2) + "\n");
+  mkdirSync(dirname(chemin), { recursive: true, mode: 0o700 });
+  const provisoire = `${chemin}.${process.pid}.tmp`;
+  writeFileSync(provisoire, JSON.stringify(valeurs, null, 2) + "\n", { mode: 0o600 });
   try {
-    chmodSync(chemin, 0o600);
+    chmodSync(provisoire, 0o600);
   } catch {
     // Windows : pas de mode POSIX ; le dossier utilisateur fait office.
   }
+  renameSync(provisoire, chemin);
   return chemin;
 }
 
@@ -1452,13 +1231,7 @@ async function login(args, { dormir = (ms) => new Promise((r) => setTimeout(r, m
   ecrire();
   ecrire(peindre("dim", `  ${t("Vérifiez que le navigateur affiche le même code, puis « Autoriser ce terminal ».", "Check that the browser shows the same code, then “Authorize this terminal”.")}`));
   ecrire();
-  // --qr : l'adresse en QR code, à scanner avec le téléphone (SSH, machine sans navigateur).
-  if (args.qr === true) {
-    if (couleursActives()) {
-      for (const ligne of dessinerQr(lienComplet ?? lien, { profondeur: profondeur() === 24 ? 24 : 4 })) ecrire(`  ${ligne}`);
-      ecrire();
-    } else ecrire(peindre("dim", `  ${t("QR code indisponible sans couleurs (NO_COLOR, tube) : ouvrez l'adresse.", "QR code unavailable without colours (NO_COLOR, pipe): open the address.")}`));
-  } else if (args["no-browser"] !== true && process.stdout.isTTY) {
+  if (args["no-browser"] !== true && process.stdout.isTTY) {
     if (!ouvrirNavigateur(lienComplet ?? lien)) ecrire(peindre("dim", `  ${t("Aucun navigateur ici : copiez l'adresse ailleurs.", "No browser here: copy the address elsewhere.")}`));
   }
   const attente = roue(t("En attente de l'autorisation dans le navigateur… (dix minutes au plus)", "Waiting for the authorization in the browser… (ten minutes at most)"));
@@ -1525,58 +1298,15 @@ function origineJeton() {
   return null;
 }
 
-// ---- commands/lecture.mjs
-// Ce que les commandes de lecture partagent : le projet requis, la sortie
-// JSON, le verdict d'un ship. Aucune ne consomme le quota de vérifications.
-
-
-
-function projetRequis(args) {
-  const id = lireProjet(une(args.project));
-  if (!id) throw new ErreurCli(t("--project manquant (ou ./.postship.json, ou POSTSHIP_PROJECT).", "--project missing (or ./.postship.json, or POSTSHIP_PROJECT)."), 2);
-  return id;
-}
-
-function sortieJson(args, payload) {
-  if (args.json !== true) return false;
-  console.log(JSON.stringify(payload, null, 2));
-  return true;
-}
-
-function lireShip(payload) {
-  return payload?.lastShip ?? null;
-}
-
-/** 1 si le ship a échoué ou si son score est sous le seuil, 0 sinon. */
-function codeDuShip(dernier, minScore) {
-  if (dernier.outcome === "fail" || dernier.outcome === "error") return 1;
-  if (minScore !== null && typeof dernier.score === "number" && dernier.score < minScore) return 1;
-  return 0;
-}
-
-/** La ligne d'un ship : « dernier ship  vercel  a1b2c3d  il y a 2 h  ✓ pass  92 ━━━━━━━━━─ ». */
-function ligneShip(ship, libelle = t("dernier ship", "last ship")) {
-  return [
-    libelle ? peindre("dim", libelle) : "",
-    ship.provider ?? "—",
-    peindre("bold", String(ship.sha ?? "").slice(0, 7) || "—"),
-    relatif(ship.at),
-    verdict(ship.outcome).trim(),
-    ship.score !== null && ship.score !== undefined ? jauge(ship.score) : "",
-  ]
-    .filter(Boolean)
-    .join("  ");
-}
-
 // ---- methodes-connexion.mjs
-// Les quatre façons de connecter la CLI (28 sept. 2026), sans rien
-// imprimer : l'interface plein écran et `postship login` les affichent
-// chacune à leur manière.
-//   - navigateur et QR code : le flux d'appareil (un code court, une page
-//     qui autorise, la clé qui arrive) — le QR n'est que l'adresse dessinée ;
-//   - email + code : le même code qu'à la connexion web, tapé dans le terminal ;
-//   - clé d'API : une clé psk_… déjà créée dans Compte → API, vérifiée avant
-//     d'être enregistrée.
+// Les deux façons de connecter la CLI, sans rien imprimer : l'interface
+// plein écran et `postship login` les affichent chacune à leur manière.
+//   - le navigateur : le flux d'appareil (un code court, une page qui
+//     autorise, la clé qui arrive) ;
+//   - une clé d'API : une clé psk_… déjà créée dans Compte → API, vérifiée
+//     avant d'être enregistrée.
+// Le QR code et l'email + code (28 sept. 2026) ont été retirés le jour
+// même, à la demande : deux chemins de plus à défendre pour un geste rare.
 
 
 const EXPIREE = () => t("Le code a expiré (dix minutes). Recommencez.", "The code expired (ten minutes). Start again.");
@@ -1601,20 +1331,6 @@ async function attendreAppareil(demande, { dormir = (ms) => new Promise((r) => s
     if (j.status !== 428) throw new ErreurCli(j.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", j.status), 2);
     if (maintenant() >= fin) throw new ErreurCli(EXPIREE(), 2);
   }
-}
-
-/** Demande un code pour une adresse ; rend { attente, dejaEnvoye }. */
-async function demanderCodeEmail(email, langue = "fr") {
-  const r = await appel("POST", "/api/cli/email/demander", { corps: { email, langue }, timeoutMs: 15_000 });
-  if (!r.ok) throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
-  return { attente: Number(r.payload?.attente) || 60, dejaEnvoye: r.payload?.dejaEnvoye === true };
-}
-
-/** Échange l'adresse et le code contre une clé ; rend { token, prefix }. */
-async function verifierCodeEmail(email, code, machine) {
-  const r = await appel("POST", "/api/cli/email/verifier", { corps: { email, code: String(code).replace(/\s+/g, ""), machine }, timeoutMs: 20_000 });
-  if (!r.ok || !r.payload?.token) throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
-  return { token: r.payload.token, prefix: r.payload.prefix };
 }
 
 /** Vérifie une clé collée : la forme, puis PostShip ; rend { token, prefix, plan }. */
@@ -1680,7 +1396,11 @@ async function versionPubliee({ forcer = false, delaiMs = 1500 } = {}) {
     const minuterie = setTimeout(() => controleur.abort(), delaiMs);
     const r = await fetch("https://registry.npmjs.org/postship/latest", { signal: controleur.signal, headers: { Accept: "application/json" } });
     clearTimeout(minuterie);
-    if (r.ok) derniere = (await r.json()).version ?? null;
+    // Une version, rien d'autre : le registre ne fait pas écrire n'importe quoi au terminal.
+    if (r.ok) {
+      const v = String((await r.json()).version ?? "");
+      derniere = /^\d+\.\d+\.\d+$/.test(v) ? v : null;
+    }
   } catch {
     // le registre ne répond pas : on retentera plus tard
   }
@@ -1701,56 +1421,44 @@ async function avisDeVersion({ json = false } = {}) {
   }
 }
 
-// ---- interface.mjs
-// L'interface plein écran : `postship` tapé seul dans un terminal
-// (28 sept. 2026, v1.4). Une fenêtre à elle — l'écran alternatif du
-// terminal, comme vim ou htop : ce qui était affiché avant revient intact
-// en quittant.
-//
-// Au premier lancement, un accueil guidé : comment se connecter
-// (navigateur, QR code, email + code, clé d'API), le projet par défaut,
-// les notifications du bureau. Ensuite, deux panneaux : les projets à
-// gauche, le projet choisi à droite (Aperçu, Incidents, Déploiements,
-// URLs, Sortie), une ligne de raccourcis en bas. On pilote au clavier —
-// c vérifie, w attend le ship, o ouvre, / tape une commande complète.
-// Toutes les 30 s, l'interface relit les projets ; un incident qui s'ouvre
-// ou se ferme passe dans la ligne du bas, avec une sonnerie.
-//
-// Sans dépendance : le mode brut de stdin, les séquences ANSI, et un
-// écran recomposé à chaque changement dont seules les lignes modifiées
-// sont réécrites.
+// ---- ui/ecran.mjs
+// L'écran de l'interface plein écran : l'écran alternatif du terminal (ce
+// qui était affiché revient intact en quittant), et une image recomposée à
+// chaque changement dont seules les lignes modifiées sont réécrites, entre
+// les bornes de la « sortie synchronisée » (?2026) quand le terminal la
+// connaît — pas de clignotement pendant qu'une ligne s'écrit.
 
-
-
-
-
-
-
-
-
-
-
-
-
-const VUES = [
-  { id: "apercu", fr: "Aperçu", en: "Overview" },
-  { id: "incidents", fr: "Incidents", en: "Incidents" },
-  { id: "ships", fr: "Déploiements", en: "Deploys" },
-  { id: "urls", fr: "URLs", en: "URLs" },
-  { id: "sortie", fr: "Sortie", en: "Output" },
-];
-const METHODES = [
-  { id: "navigateur", fr: "Avec le navigateur de cet ordinateur", en: "With this computer's browser" },
-  { id: "qr", fr: "Avec un QR code, depuis le téléphone", en: "With a QR code, from your phone" },
-  { id: "email", fr: "Avec mon email et un code", en: "With my email and a code" },
-  { id: "cle", fr: "Avec une clé d'API", en: "With an API key" },
-];
-/** Les commandes qui quittent l'interface pour s'exécuter dans le terminal : elles y lisent le clavier, ou remplacent la CLI. */
-const DANS_LE_TERMINAL = new Set(["update", "uninstall", "init", "watch", "completion"]);
-const AVEC_PROJET_INTERFACE = new Set(["status", "check", "incidents", "ship", "ships", "urls", "wait", "gate", "open"]);
-const PROJETS_SUIVIS_INTERFACE = 20;
-const LARGEUR_MIN = 50;
-const HAUTEUR_MIN = 14;
+/** L'écran : sa taille, l'entrée et la sortie de l'écran alternatif, et le dessin d'une image. */
+function creerEcran(sortie) {
+  const ecrire = sortie.write.bind(sortie);
+  let precedent = [];
+  return {
+    ecrire,
+    taille: () => ({ w: Math.max(20, sortie.columns || 80), h: Math.max(8, sortie.rows || 24) }),
+    entrer() {
+      ecrire("\x1b[?1049h\x1b[?25l\x1b[2J");
+    },
+    sortir() {
+      ecrire("\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?1049l");
+    },
+    /** Après un redimensionnement : tout est à réécrire. */
+    invalider() {
+      precedent = [];
+      ecrire("\x1b[2J");
+    },
+    peindre(lignes, h) {
+      let s = "\x1b[?2026h";
+      for (let i = 0; i < h; i++) {
+        const l = lignes[i] ?? "";
+        if (precedent[i] === l) continue;
+        s += `\x1b[${i + 1};1H${l}\x1b[0m\x1b[K`;
+      }
+      s += "\x1b[?2026l";
+      precedent = lignes.slice(0, h);
+      ecrire(s);
+    },
+  };
+}
 
 /**
  * La couleur de fond du terminal, demandée par OSC 11 (xterm, Windows
@@ -1762,10 +1470,10 @@ function detecterTheme(entree, ecrire, delaiMs = 250) {
     let tampon = "";
     const finir = (valeur) => {
       clearTimeout(minuterie);
-      entree.off("data", surDonnees);
+      entree.off("data", surReponse);
       resolve(valeur);
     };
-    const surDonnees = (d) => {
+    const surReponse = (d) => {
       tampon += String(d);
       const m = tampon.match(/\]11;rgba?:([0-9a-f]+)\/([0-9a-f]+)\/([0-9a-f]+)/i);
       if (!m) return;
@@ -1773,44 +1481,634 @@ function detecterTheme(entree, ecrire, delaiMs = 250) {
       finir(0.2126 * r + 0.7152 * g + 0.0722 * b > 140 ? "clair" : "sombre");
     };
     const minuterie = setTimeout(() => finir(null), delaiMs);
-    entree.on("data", surDonnees);
+    entree.on("data", surReponse);
     ecrire("\x1b]11;?\x1b\\");
   });
 }
 
+// ---- ui/donnees.mjs
+// Les données de l'interface : le compte, les projets, leurs incidents
+// ouverts et leur dernier ship, relus en direct ; le détail du projet
+// affiché, lu à la demande. Et ce qui a changé d'un relevé à l'autre —
+// un incident ouvert ou résolu, un ship vérifié —, rendu sous forme
+// d'événements que l'interface affiche et sonne.
+
+const PROJETS_SUIVIS_UI = 20;
+const FRAICHEUR_DETAILS_MS = 60_000;
+
+/** Un ship dont le verdict est posé (ni en attente, ni en cours). */
+function shipConclu(ship) {
+  return !!ship && ship.outcome !== null && ship.outcome !== undefined && ship.outcome !== "pending" && ship.outcome !== "running";
+}
+
+/**
+ * L'ordre de la liste : les projets qui ont un incident ouvert d'abord
+ * (les plus touchés en tête), puis ceux dont la dernière vérification a
+ * échoué, puis les autres par nom ; les projets en pause à la fin.
+ */
+function trierProjets(projets, ouverts) {
+  const rang = (p) => (p.paused ? 3 : (ouverts.get(p.id)?.length ?? 0) > 0 ? 0 : p.status === "fail" || p.status === "error" ? 1 : 2);
+  return [...projets].sort((a, b) => rang(a) - rang(b) || (ouverts.get(b.id)?.length ?? 0) - (ouverts.get(a.id)?.length ?? 0) || a.name.localeCompare(b.name));
+}
+
+/** Les projets dont le nom ou l'adresse contient le filtre, sans casse ni accents. */
+function filtrerProjets(projets, filtre) {
+  const simple = (s) => String(s ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const q = simple(filtre).trim();
+  if (!q) return projets;
+  return projets.filter((p) => simple(p.name).includes(q) || simple(p.url).includes(q));
+}
+
+/**
+ * « Prêt à livrer ? » — la même réponse que `postship gate` : un incident
+ * ouvert ferme la barrière, un dernier ship en échec aussi, et un score
+ * sous le seuil de ./.postship.json.
+ */
+function verdictLivraison({ paused, ouverts, ship, minScore }) {
+  if (paused) return { etat: "pause" };
+  if (ouverts > 0) return { etat: "bloque", raison: "incidents", n: ouverts };
+  if (!ship) return { etat: "inconnu" };
+  if (!shipConclu(ship)) return { etat: "attente" };
+  if (ship.outcome === "fail" || ship.outcome === "error") return { etat: "bloque", raison: "ship" };
+  if (typeof minScore === "number" && typeof ship.score === "number" && ship.score < minScore) return { etat: "bloque", raison: "score", score: ship.score, minScore };
+  return { etat: "pret" };
+}
+
+/** Les incidents apparus et disparus entre deux relevés, projet par projet (seulement ceux déjà connus). */
+function comparerIncidents(anciens, nouveaux, projets) {
+  const cle = (i) => `${i.url}|${i.kind ?? ""}`;
+  const evenements = [];
+  for (const p of projets) {
+    if (!anciens.has(p.id) || !nouveaux.has(p.id)) continue;
+    const avant = new Set((anciens.get(p.id) ?? []).map(cle));
+    const apres = new Set((nouveaux.get(p.id) ?? []).map(cle));
+    for (const i of nouveaux.get(p.id) ?? []) if (!avant.has(cle(i))) evenements.push({ type: "ouvert", projet: p, url: i.url });
+    for (const i of anciens.get(p.id) ?? []) if (!apres.has(cle(i))) evenements.push({ type: "resolu", projet: p, url: i.url });
+  }
+  return evenements;
+}
+
+/** Les ships qui viennent d'être conclus : un nouveau commit, ou le même dont le verdict vient de tomber. */
+function comparerShips(anciens, nouveaux, projets) {
+  const evenements = [];
+  for (const p of projets) {
+    if (!anciens.has(p.id) || !nouveaux.has(p.id)) continue;
+    const avant = anciens.get(p.id);
+    const apres = nouveaux.get(p.id);
+    if (!shipConclu(apres)) continue;
+    const nouveau = !avant || avant.sha !== apres.sha || avant.at !== apres.at;
+    if (nouveau || !shipConclu(avant)) evenements.push({ type: "ship", projet: p, ship: apres });
+  }
+  return evenements;
+}
+
+/**
+ * Le magasin : `rafraichir` relit tout (un seul relevé à la fois — un
+ * appel pendant qu'un autre court attend celui-là), `chargerDetails` lit
+ * le détail d'un projet, gardé une minute.
+ */
+function creerDonnees() {
+  const d = { moi: null, projets: [], ouverts: new Map(), ships: new Map(), details: new Map(), majLe: null, horsLigne: null };
+  let enCours = null;
+  let tours = 0;
+
+  async function relire({ annoncer }) {
+    const [moi, liste] = await Promise.all([appelAuthentifie("GET", "/api/v1/me"), appelAuthentifie("GET", "/api/v1/projects")]);
+    const projets = liste?.projects ?? [];
+    const suivis = projets.filter((p) => !p.paused).slice(0, PROJETS_SUIVIS_UI);
+    // Les derniers ships une fois sur deux (toutes les minutes) : une alerte de ship n'a pas besoin des trente secondes.
+    const avecShips = tours % 2 === 0;
+    tours++;
+    const [incidents, ships] = await Promise.all([
+      Promise.all(suivis.map((p) => appelAuthentifie("GET", `/api/v1/projects/${encodeURIComponent(p.id)}/incidents`).catch(() => null))),
+      avecShips ? Promise.all(suivis.map((p) => appelAuthentifie("GET", `/api/v1/projects/${encodeURIComponent(p.id)}/last-ship`).catch(() => null))) : Promise.resolve(null),
+    ]);
+    const ouverts = new Map(suivis.map((p, i) => [p.id, incidents[i] ? (incidents[i].incidents ?? []) : (d.ouverts.get(p.id) ?? [])]));
+    const shipsLus = ships ? new Map(suivis.map((p, i) => [p.id, ships[i] ? (ships[i].lastShip ?? null) : (d.ships.get(p.id) ?? null)])) : d.ships;
+    const evenements = annoncer && d.moi ? [...comparerIncidents(d.ouverts, ouverts, suivis), ...(ships ? comparerShips(d.ships, shipsLus, suivis) : [])] : [];
+    Object.assign(d, { moi, projets, ouverts, ships: shipsLus, majLe: Date.now(), horsLigne: null });
+    // Le dernier ship fraîchement lu vaut aussi pour le détail déjà chargé.
+    if (ships) for (const [id, s] of shipsLus) if (d.details.has(id)) d.details.get(id).ship = s;
+    return { evenements, refuse: false };
+  }
+
+  async function rafraichir({ annoncer = true } = {}) {
+    if (enCours) return enCours;
+    enCours = relire({ annoncer })
+      .catch((err) => {
+        if (err?.status === 401) return { evenements: [], refuse: true };
+        d.horsLigne = err?.message ?? String(err);
+        return { evenements: [], refuse: false };
+      })
+      .finally(() => {
+        enCours = null;
+      });
+    return enCours;
+  }
+
+  async function chargerDetails(p, forcer = false) {
+    if (!p) return;
+    const deja = d.details.get(p.id);
+    if (deja && !forcer && Date.now() - deja.lu < FRAICHEUR_DETAILS_MS) return;
+    const id = encodeURIComponent(p.id);
+    const [ls, sh, pr] = await Promise.all([
+      appelAuthentifie("GET", `/api/v1/projects/${id}/last-ship`).catch(() => null),
+      appelAuthentifie("GET", `/api/v1/projects/${id}/ships?limit=20`).catch(() => null),
+      appelAuthentifie("GET", `/api/v1/projects/${id}`).catch(() => null),
+    ]);
+    d.details.set(p.id, { ship: ls?.lastShip ?? null, ships: sh?.ships ?? [], urls: pr?.project?.urls ?? null, statusPage: pr?.project?.statusPage ?? null, lu: Date.now() });
+  }
+
+  function oublier() {
+    Object.assign(d, { moi: null, projets: [], ouverts: new Map(), ships: new Map(), details: new Map(), majLe: null, horsLigne: null });
+    tours = 0;
+  }
+
+  return { d, rafraichir, chargerDetails, oublier };
+}
+
+// ---- commands/lecture.mjs
+// Ce que les commandes de lecture partagent : le projet requis, la sortie
+// JSON, le verdict d'un ship. Aucune ne consomme le quota de vérifications.
+
+
+
+function projetRequis(args) {
+  const id = lireProjet(une(args.project));
+  if (!id) throw new ErreurCli(t("--project manquant (ou ./.postship.json, ou POSTSHIP_PROJECT).", "--project missing (or ./.postship.json, or POSTSHIP_PROJECT)."), 2);
+  return id;
+}
+
+function sortieJson(args, payload) {
+  if (args.json !== true) return false;
+  console.log(JSON.stringify(payload, null, 2));
+  return true;
+}
+
+function lireShip(payload) {
+  return payload?.lastShip ?? null;
+}
+
+/** 1 si le ship a échoué ou si son score est sous le seuil, 0 sinon. */
+function codeDuShip(dernier, minScore) {
+  if (dernier.outcome === "fail" || dernier.outcome === "error") return 1;
+  if (minScore !== null && typeof dernier.score === "number" && dernier.score < minScore) return 1;
+  return 0;
+}
+
+/** La ligne d'un ship : « dernier ship  vercel  a1b2c3d  il y a 2 h  ✓ pass  92 ━━━━━━━━━─ ». */
+function ligneShip(ship, libelle = t("dernier ship", "last ship")) {
+  return [
+    libelle ? peindre("dim", libelle) : "",
+    ship.provider ?? "—",
+    peindre("bold", String(ship.sha ?? "").slice(0, 7) || "—"),
+    relatif(ship.at),
+    verdict(ship.outcome).trim(),
+    ship.score !== null && ship.score !== undefined ? jauge(ship.score) : "",
+  ]
+    .filter(Boolean)
+    .join("  ");
+}
+
+// ---- ui/vues.mjs
+// Le rendu de l'interface : chaque écran est une fonction pure de l'état
+// (celui de l'interface, `e`, et celui des données, `d`) vers des lignes
+// de la largeur de l'écran. Aucune écriture ici — interface.mjs peint.
+
+
+
+
+
+const VUES_UI = [
+  { id: "apercu", fr: "Aperçu", en: "Overview" },
+  { id: "incidents", fr: "Incidents", en: "Incidents" },
+  { id: "ships", fr: "Déploiements", en: "Deploys" },
+  { id: "urls", fr: "URLs", en: "URLs" },
+  { id: "sortie", fr: "Sortie", en: "Output" },
+];
+const METHODES_UI = [
+  { id: "navigateur", fr: "Avec le navigateur de cet ordinateur", en: "With this computer's browser" },
+  { id: "cle", fr: "Avec une clé d'API", en: "With an API key" },
+];
+const LARGEUR_MIN_UI = 50;
+const HAUTEUR_MIN_UI = 14;
+
+/** Les projets tels que la liste les montre : triés, puis filtrés. */
+function projetsAffiches(e, d) {
+  return filtrerProjets(trierProjets(d.projets, d.ouverts), e.filtre);
+}
+
+/** Les lignes qu'on peut choisir dans une vue (Tab) : incidents, URLs, déploiements. */
+function rangeesVue(vue, p, d) {
+  if (!p) return [];
+  if (vue === "incidents") return (d.ouverts.get(p.id) ?? []).map((i) => ({ url: i.url, incident: i }));
+  if (vue === "urls") return (d.details.get(p.id)?.urls ?? []).map((u) => ({ url: u.url, cible: u }));
+  if (vue === "ships") return (d.details.get(p.id)?.ships ?? []).map((s) => ({ ship: s }));
+  return [];
+}
+
+function creerVues({ L, U }) {
+  const B = U ? { v: "│", h: "─" } : { v: "|", h: "-" };
+  const ROUE = U ? ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] : ["|", "/", "-", "\\"];
+  const heure = (ms) => new Date(ms).toLocaleTimeString(L === "fr" ? "fr-FR" : "en-GB", { hour: "2-digit", minute: "2-digit" });
+  const touche = (k, texte) => `${peindre("bold", k)} ${peindre("dim", texte)}`;
+  const curseur = () => (couleursActives() ? "\x1b[7m \x1b[27m" : "_");
+  const largeurBloc = (w) => Math.min(72, w - 5);
+  const para = (texte, w, couleur) => plier(texte, largeurBloc(w)).map((l) => (couleur ? peindre(couleur, l) : l));
+
+  // --- les écrans centrés : chargement, connexion, réglages -------------
+
+  function centre(lignesBloc, pied, w, h) {
+    const lb = Math.min(72, w - 4);
+    const marge = " ".repeat(Math.max(1, Math.floor((w - lb) / 2)));
+    const bloc = [`${peindre("signal", peindre("bold", "<>"))} ${peindre("bold", "postship")}`, "", "", ...lignesBloc];
+    const haut = Math.max(1, Math.floor((h - bloc.length - 2) / 2));
+    const lignes = new Array(h).fill("");
+    bloc.forEach((l, i) => {
+      if (haut + i < h - 2) lignes[haut + i] = marge + tronquer(l, lb);
+    });
+    if (pied) lignes[h - 1] = ` ${tronquer(pied, w - 2)}`;
+    return lignes;
+  }
+
+  function liste(options, index) {
+    return options.map((o, i) => {
+      const actif = i === index;
+      const texte = `${actif ? peindre("signal", U ? "›" : ">") : " "} ${actif ? peindre("bold", o) : o}`;
+      return actif ? surFond("choix", ` ${completer(texte, 44)} `) : ` ${texte}`;
+    });
+  }
+
+  function champ(valeur, masque) {
+    const affiche = masque ? (U ? "•" : "*").repeat(Math.min(valeur.length, 40)) : valeur;
+    return [`  ${affiche}${curseur()}`, `  ${peindre("trait", B.h.repeat(46))}`];
+  }
+
+  function etat(e, w) {
+    if (e.occupe) return [`  ${peindre("signal", ROUE[e.image % ROUE.length])} ${e.occupe}`];
+    if (e.erreur) return para(`${U ? "×" : "x"} ${e.erreur}`, w, "red");
+    if (e.message) return para(e.message, w, "dim");
+    return [];
+  }
+
+  const piedChoix = () => `${touche(U ? "↑↓" : "Up/Down", t("choisir", "choose"))}   ${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche("q", t("quitter", "quit"))}`;
+
+  function ecranConnexion(e, w, h) {
+    return centre([...para(t("Comment voulez-vous vous connecter ?", "How do you want to sign in?"), w), "", ...liste(METHODES_UI.map((m) => m[L]), e.methode), "", ...etat(e, w)], piedChoix(), w, h);
+  }
+
+  function ecranNavigateur(e, w, h) {
+    const pied = `${touche(t("Échap", "Esc"), t("revenir", "back"))}   ${touche("q", t("quitter", "quit"))}`;
+    const dm = e.demande;
+    if (!dm) return centre([...etat(e, w)], pied, w, h);
+    return centre(
+      [
+        ...para(t("Le navigateur s'ouvre sur postship.fr. Vérifiez que le code est le même, puis autorisez.", "The browser opens on postship.fr. Check that the code is the same, then authorize."), w),
+        "",
+        `  ${peindre("signal", peindre("bold", dm.userCode.split("").join(" ")))}`,
+        "",
+        ...para(t("Rien ne s'ouvre ? Allez sur {0}", "Nothing opens? Go to {0}", dm.lienComplet), w, "dim"),
+        "",
+        ...etat(e, w),
+      ],
+      pied,
+      w,
+      h,
+    );
+  }
+
+  function ecranCle(e, w, h) {
+    const pied = `${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche(t("Échap", "Esc"), t("revenir", "back"))}`;
+    return centre([t("Collez votre clé d'API", "Paste your API key"), "", ...champ(e.saisie, true), "", ...para(t("Elle commence par psk_ ; créez-la dans Compte → API sur postship.fr. Elle ne s'affiche pas ici.", "It starts with psk_; create it in Account → API on postship.fr. It is not shown here."), w, "dim"), "", ...etat(e, w)], pied, w, h);
+  }
+
+  function ecranProjetDefaut(e, d, w, h) {
+    const options = [t("Tous les projets", "Every project"), ...trierProjets(d.projets, d.ouverts).map((p) => p.name)];
+    return centre([...para(t("Quel projet afficher en premier ?", "Which project should open first?"), w), "", ...liste(options.slice(0, Math.max(3, h - 14)), e.choix), "", ...para(t("Modifiable plus tard : d sur un projet, ou / puis reglages.", "Change it later: d on a project, or / then reglages."), w, "dim")], piedChoix(), w, h);
+  }
+
+  function ecranNotifications(e, w, h) {
+    return centre([...para(t("Une notification du bureau quand un incident s'ouvre ou se ferme, ou qu'un ship est vérifié ?", "A desktop notification when an incident opens or closes, or a ship is checked?"), w), "", ...liste([t("Oui", "Yes"), t("Non, la sonnerie et la ligne du bas suffisent", "No, the ring and the bottom line are enough")], e.choix), "", ...para(t("Modifiable plus tard : n dans l'interface.", "Change it later: n in the interface."), w, "dim")], piedChoix(), w, h);
+  }
+
+  // --- l'écran principal -------------------------------------------------
+
+  function panneauProjets(e, d, lw, n) {
+    const affiches = projetsAffiches(e, d);
+    const titre = e.filtreEdition
+      ? ` ${peindre("signal", "f")} ${e.filtre}${curseur()}`
+      : e.filtre
+        ? ` ${peindre("dim", t("Filtre", "Filter"))} ${peindre("bold", e.filtre)} ${peindre("dim", `${affiches.length}/${d.projets.length}`)}`
+        : ` ${peindre("dim", t("Projets", "Projects"))}${d.projets.length ? peindre("dim", `  ${d.projets.length}`) : ""}`;
+    const l = [titre, ""];
+    if (d.projets.length === 0) {
+      if (d.horsLigne) l.push(` ${peindre("yellow", t("Hors ligne.", "Offline."))}`, ` ${peindre("dim", t("r pour réessayer", "r to retry"))}`);
+      else l.push(` ${peindre("dim", t("Aucun projet.", "No project."))}`, ` ${peindre("dim", t("Créez-en un sur postship.fr", "Create one on postship.fr"))}`);
+      return l;
+    }
+    if (affiches.length === 0) {
+      l.push(` ${peindre("dim", t("Aucun projet ne correspond.", "No project matches."))}`);
+      return l;
+    }
+    const sel = Math.max(0, affiches.findIndex((p) => p.id === e.selId));
+    const place = n - 2;
+    const debut = Math.min(Math.max(0, sel - Math.floor(place / 2)), Math.max(0, affiches.length - place));
+    for (const [i, p] of affiches.slice(debut, debut + place).entries()) {
+      const actif = debut + i === sel;
+      const etatP = p.paused ? "muted" : p.status;
+      const nb = d.ouverts.get(p.id)?.length ?? 0;
+      const droite = p.paused ? peindre("dim", t("pause", "paused")) : nb ? peindre("red", String(nb)) : "";
+      const puce = peindre(TEINTE[etatP] ?? "dim", p.paused ? (U ? "○" : "o") : U ? "●" : "*");
+      const marqueur = actif && !couleursActives() ? ">" : " ";
+      const nom = tronquer(p.name, lw - 6 - visible(droite).length);
+      const ligne = `${completer(`${marqueur}${puce} ${actif ? peindre("bold", nom) : nom}`, lw - 1 - visible(droite).length)}${droite}`;
+      // La ligne choisie est pleine quand la liste a la main, en retrait quand c'est le détail.
+      l.push(actif ? (e.focus === "projets" ? surFond("choix", completer(ligne, lw)) : peindre("bold", ligne)) : ligne);
+    }
+    return l;
+  }
+
+  function onglets(e) {
+    return VUES_UI.map((v) => (v.id === e.vue ? peindre("signal", peindre("bold", v[L])) : peindre("dim", v[L]))).join("   ");
+  }
+
+  function vueApercu(e, d, p, minScore) {
+    const l = [`${peindre("bold", p.name)}  ${peindre("dim", adresseCourte(p.url))}`, ""];
+    const ouverts = d.ouverts.get(p.id) ?? [];
+    const det = d.details.get(p.id);
+    const ship = det?.ship ?? d.ships.get(p.id) ?? null;
+    const lab = (s) => peindre("dim", s.padEnd(14));
+
+    const v = verdictLivraison({ paused: p.paused, ouverts: ouverts.length, ship, minScore });
+    const textes = {
+      pause: `${symbole("muted")} ${peindre("dim", t("En pause : aucune vérification.", "Paused: no checks."))}`,
+      pret: `${symbole("pass")} ${peindre("green", t("Prêt à livrer", "Clear to ship"))}`,
+      inconnu: `${symbole("skip")} ${peindre("dim", t("Aucun déploiement suivi : rien à juger.", "No deploy tracked: nothing to judge."))}`,
+      attente: `${peindre("yellow", U ? "…" : "...")} ${peindre("yellow", t("Le dernier ship est en cours de vérification.", "The last ship is being checked."))}`,
+    };
+    const bloque = {
+      incidents: v.n === 1 ? t("Livraison bloquée : 1 incident ouvert", "Shipping blocked: 1 open incident") : t("Livraison bloquée : {0} incidents ouverts", "Shipping blocked: {0} open incidents", v.n),
+      ship: t("Livraison bloquée : le dernier ship est en échec", "Shipping blocked: the last ship failed"),
+      score: t("Livraison bloquée : score {0} sous le seuil de {1}", "Shipping blocked: score {0} below the {1} threshold", v.score, v.minScore),
+    };
+    l.push(v.etat === "bloque" ? `${symbole("fail")} ${peindre("red", bloque[v.raison])}` : textes[v.etat]);
+    for (const i of ouverts.slice(0, 4)) l.push(`   ${symbole(i.outcome)} ${adresseCourte(i.url)}  ${peindre("dim", i.kind ?? "")}  ${peindre("dim", t("constaté {0}", "seen {0}", relatif(i.since)))}`);
+    if (ouverts.length > 4) l.push(peindre("dim", `   ${t("… et {0} autres — 2 pour la liste", "… and {0} more — 2 for the list", ouverts.length - 4)}`));
+    l.push("");
+
+    if (!det) l.push(peindre("dim", t("Lecture…", "Reading…")));
+    else {
+      l.push(`${lab(t("Dernier ship", "Last ship"))}${ship ? ligneShip(ship, "") : peindre("dim", t("aucun déploiement suivi", "no deploy tracked"))}`);
+      const notes = (det.ships ?? []).filter((s) => typeof s.score === "number");
+      if (notes.length > 1) l.push(`${lab(t("Historique", "History"))}${courbe([...det.ships].reverse().map((s) => s.score))}  ${peindre("dim", t("moyenne {0}", "average {0}", Math.round(notes.reduce((a, s) => a + s.score, 0) / notes.length)))}`);
+      if (det.urls) {
+        const actives = det.urls.filter((u) => u.enabled);
+        const ko = actives.filter((u) => u.outcome === "fail" || u.outcome === "error").length;
+        l.push(`${lab("URLs")}${t("{0} surveillées", "{0} monitored", actives.length)}${ko ? peindre("red", ` · ${ko} ${t("en échec", "failing")}`) : peindre("green", ` · ${t("toutes bonnes", "all good")}`)}`);
+      }
+      if (det.statusPage) l.push(`${lab(t("Page de statut", "Status page"))}/s/${det.statusPage}  ${peindre("dim", t("s pour l'ouvrir", "s to open it"))}`);
+    }
+    const evenements = e.journal.filter((x) => x.projet === p.id).slice(0, 5);
+    if (evenements.length) {
+      l.push("", peindre("dim", t("Pendant cette séance", "This session")));
+      for (const x of evenements) l.push(`${peindre("dim", x.heure)}  ${x.texte}`);
+    }
+    return l;
+  }
+
+  function texteRangee(vue, r) {
+    if (vue === "incidents") return `${symbole(r.incident.outcome)} ${adresseCourte(r.incident.url)}  ${peindre("dim", r.incident.kind ?? "")}  ${peindre("dim", t("constaté {0}", "seen {0}", relatif(r.incident.since)))}`;
+    if (vue === "urls") return `${verdict(r.cible.enabled ? r.cible.outcome : "muted")}  ${peindre("dim", String(r.cible.kind ?? "").padEnd(12))}  ${adresseCourte(r.cible.url)}  ${peindre("dim", relatif(r.cible.lastCheckedAt))}`;
+    const s = r.ship;
+    return `${verdict(s.outcome)}  ${peindre("bold", String(s.sha ?? "").slice(0, 7) || "—")}  ${peindre("dim", (s.provider ?? "—").padEnd(8))}  ${relatif(s.at).padEnd(14)}  ${typeof s.score === "number" ? jauge(s.score) : peindre("dim", "—")}`;
+  }
+
+  function vueListe(e, d, p, n, rw) {
+    const rangees = rangeesVue(e.vue, p, d);
+    const det = d.details.get(p.id);
+    const l = [];
+    if (e.vue !== "incidents" && !det) return [peindre("dim", t("Lecture…", "Reading…"))];
+    if (!rangees.length) {
+      if (e.vue === "incidents") return [`${symbole("pass")} ${peindre("green", t("Rien d'ouvert sur {0}.", "Nothing open on {0}.", p.name))}`];
+      return [peindre("dim", e.vue === "urls" ? t("Aucune URL.", "No URL.") : t("Aucun déploiement de production suivi.", "No production deploy tracked."))];
+    }
+    if (e.vue === "ships" && rangees.length > 1) l.push(`${courbe([...det.ships].reverse().map((s) => s.score))}  ${peindre("dim", t("{0} derniers ships", "last {0} ships", rangees.length))}`, "");
+    const place = n - l.length - 1;
+    const sel = e.focus === "detail" ? Math.min(e.ligne, rangees.length - 1) : -1;
+    const debut = Math.min(Math.max(0, sel - Math.floor(place / 2)), Math.max(0, rangees.length - place));
+    rangees.slice(debut, debut + place).forEach((r, i) => {
+      const texte = tronquer(texteRangee(e.vue, r), rw);
+      l.push(debut + i === sel ? surFond("choix", completer(texte, rw)) : texte);
+    });
+    if (e.focus !== "detail") l.push("", peindre("dim", t("Tab pour choisir une ligne", "Tab to pick a line")));
+    else l.push("", peindre("dim", e.vue === "ships" ? t("o ouvre les déploiements · Échap revient", "o opens deploys · Esc goes back") : t("c vérifie cette adresse · o l'ouvre · Échap revient", "c checks this address · o opens it · Esc goes back")));
+    return l;
+  }
+
+  function vueSortie(e, n) {
+    if (!e.sortie.length) return [peindre("dim", t("Le résultat des commandes s'affiche ici : c vérifie le projet, / ouvre la liste des commandes.", "Command results show up here: c checks the project, / opens the command list."))];
+    const fin = Math.max(0, e.sortie.length - e.defil);
+    return e.sortie.slice(Math.max(0, fin - Math.max(1, n)), fin);
+  }
+
+  function panneauDetail(e, d, rw, n, minScore) {
+    const l = [onglets(e), ""];
+    const p = projetsAffiches(e, d).find((x) => x.id === e.selId) ?? null;
+    if (e.vue === "sortie") l.push(...vueSortie(e, n - 2));
+    else if (!p) l.push(peindre("dim", t("Aucun projet à afficher.", "No project to show.")));
+    else if (e.vue === "apercu") l.push(...vueApercu(e, d, p, minScore));
+    else l.push(...vueListe(e, d, p, n - 2, rw));
+    return l.slice(0, n).map((x) => tronquer(x, rw));
+  }
+
+  function piedDePage(e, w) {
+    if (e.palette) {
+      const droite = peindre("dim", `${t("Entrée", "Enter")} ${t("lancer", "run")} · Tab ${t("compléter", "complete")} · ${t("Échap", "Esc")} ${t("fermer", "close")}`);
+      return `${completer(tronquer(` ${peindre("signal", "/")}${e.saisie}${curseur()}`, w - visible(droite).length - 2), w - visible(droite).length - 1)}${droite}`;
+    }
+    if (e.action) {
+      const droite = peindre("dim", t("Échap annule", "Esc cancels"));
+      return `${completer(tronquer(` ${peindre("signal", ROUE[e.image % ROUE.length])} ${e.action.libelle}`, w - 16), w - visible(droite).length - 1)}${droite}`;
+    }
+    if (e.flash && Date.now() < e.flash.jusqua) return ` ${tronquer(e.flash.texte, w - 2)}`;
+    if (e.filtreEdition) return ` ${touche(t("Entrée", "Enter"), t("garder le filtre", "keep the filter"))}   ${touche(t("Échap", "Esc"), t("l'effacer", "clear it"))}`;
+    const toujours = [touche("?", t("aide", "help")), touche("q", t("quitter", "quit"))];
+    const raccourcis =
+      e.focus === "detail"
+        ? [touche(U ? "↑↓" : "Up/Dn", t("ligne", "line")), touche("c", t("vérifier", "check")), touche("o", t("ouvrir", "open")), touche(t("Échap", "Esc"), t("revenir", "back"))]
+        : [touche(U ? "↑↓" : "Up/Dn", t("projet", "project")), touche(U ? "←→" : "Left/Right", t("vue", "view")), touche("c", t("vérifier", "check")), touche("w", t("attendre le ship", "wait for the ship")), touche("f", t("filtrer", "filter")), touche("/", t("commande", "command")), touche("o", t("ouvrir", "open"))];
+    const pris = [];
+    for (const r of raccourcis) {
+      if (visible([...pris, r, ...toujours].join("   ")).length + 2 > w) break;
+      pris.push(r);
+    }
+    return ` ${[...pris, ...toujours].join("   ")}`;
+  }
+
+  function entete(e, d, w) {
+    const gauche = ` ${peindre("signal", peindre("bold", "<>"))} ${peindre("bold", "postship")}`;
+    // Du plus utile au moins utile : ce qui ne tient pas tombe par la fin.
+    const infos = [];
+    if (e.versionDispo) infos.push(peindre("yellow", t("{0} disponible — /update", "{0} available — /update", e.versionDispo)));
+    infos.push(d.horsLigne ? peindre("yellow", t("hors ligne", "offline")) : d.majLe ? peindre("dim", t("à jour à {0}", "as of {0}", heure(d.majLe))) : peindre("dim", t("lecture…", "reading…")));
+    if (d.moi) {
+      const ratio = d.moi.quota.limit ? d.moi.quota.used / d.moi.quota.limit : 0;
+      infos.push(peindre("dim", nomPlan(d.moi.plan)), peindre(ratio >= 0.9 ? "red" : ratio >= 0.7 ? "yellow" : "dim", `${d.moi.quota.used}/${d.moi.quota.limit} ${t("vérifications", "checks")}`));
+    }
+    if (e.notifications) infos.push(peindre("dim", t("notifications", "notifications")));
+    const place = w - visible(gauche).length - 3;
+    while (infos.length > 1 && visible(infos.join(" · ")).length > place) infos.pop();
+    const droite = tronquer(infos.join(peindre("dim", " · ")), Math.max(0, place));
+    return `${completer(gauche, w - visible(droite).length - 1)}${droite} `;
+  }
+
+  function ecranPrincipal(e, d, w, h, minScore) {
+    const lignes = [entete(e, d, w), peindre("trait", B.h.repeat(w))];
+    const corps = h - 4;
+    const lw = Math.max(24, Math.min(38, Math.floor(w * 0.28)));
+    const rw = w - lw - 3;
+    const g = panneauProjets(e, d, lw, corps);
+    const dt = panneauDetail(e, d, rw, corps, minScore);
+    for (let i = 0; i < corps; i++) lignes.push(`${completer(tronquer(g[i] ?? "", lw), lw)} ${peindre("trait", B.v)} ${dt[i] ?? ""}`);
+    lignes.push(peindre("trait", B.h.repeat(w)), piedDePage(e, w));
+
+    if (e.palette && e.menu.length) {
+      const place = Math.min(8, corps - 1, e.menu.length);
+      const debut = Math.min(Math.max(0, e.selMenu - place + 1), Math.max(0, e.menu.length - place));
+      const vus = e.menu.slice(debut, debut + place);
+      const largNom = Math.min(24, Math.max(...vus.map((x) => x.nom.length)) + 2);
+      vus.forEach((x, i) => {
+        const actif = debut + i === e.selMenu;
+        const ligne = completer(tronquer(` ${actif ? peindre("signal", U ? "›" : ">") : " "} ${peindre("bold", x.nom.padEnd(largNom))} ${peindre("dim", x.texte)}`, w), w);
+        lignes[h - 2 - place + i] = actif ? surFond("choix", ligne) : ligne;
+      });
+    }
+
+    if (e.aide) {
+      const col = (k, v) => `${peindre("bold", k.padEnd(8))}${peindre("dim", v)}`;
+      const g2 = [
+        col(U ? "↑ ↓" : "Up Dn", t("choisir un projet", "choose a project")),
+        col(U ? "← →" : "Lt Rt", t("changer de vue", "switch view")),
+        col("Tab", t("choisir une ligne de la vue", "pick a line in the view")),
+        col("f", t("filtrer les projets", "filter projects")),
+        col("/", t("taper une commande", "type a command")),
+        col(t("Échap", "Esc"), t("annuler, revenir", "cancel, go back")),
+      ];
+      const d2 = [
+        col("c", t("vérifier (1 du quota)", "check (1 of quota)")),
+        col("w", t("attendre le prochain ship", "wait for the next ship")),
+        col("o", t("ouvrir dans le navigateur", "open in the browser")),
+        col("s", t("ouvrir la page de statut", "open the status page")),
+        col("d", t("projet par défaut", "default project")),
+        col("n", t("notifications du bureau", "desktop notifications")),
+      ];
+      const bloc = [peindre("bold", t("Raccourcis", "Shortcuts")), ""];
+      for (let i = 0; i < g2.length; i++) bloc.push(`${completer(g2[i], 38)}${d2[i] ?? ""}`);
+      bloc.push("", peindre("dim", t("/ puis une commande : check example.com, wait --head, whoami, logout, update… · r relit · q quitte", "/ then a command: check example.com, wait --head, whoami, logout, update… · r reads again · q quits")), peindre("dim", t("Une touche ferme cette aide.", "Any key closes this help.")));
+      const haut = Math.max(2, Math.floor((h - bloc.length) / 2) - 1);
+      const marge = " ".repeat(Math.max(2, Math.floor((w - 80) / 2)));
+      lignes[haut - 1] = peindre("trait", B.h.repeat(w));
+      bloc.forEach((b, i) => (lignes[haut + i] = completer(`${marge}${tronquer(b, w - marge.length)}`, w)));
+      lignes[haut + bloc.length] = peindre("trait", B.h.repeat(w));
+    }
+    return lignes;
+  }
+
+  /** L'image entière de l'écran, selon l'écran courant. */
+  function rendre(e, d, w, h, minScore) {
+    if (w < LARGEUR_MIN_UI || h < HAUTEUR_MIN_UI) {
+      const lignes = new Array(h).fill("");
+      lignes[Math.floor(h / 2) - 1] = ` ${peindre("bold", "postship")}`;
+      lignes[Math.floor(h / 2)] = ` ${t("Agrandissez la fenêtre ({0} × {1} au moins).", "Enlarge the window ({0} × {1} at least).", LARGEUR_MIN_UI, HAUTEUR_MIN_UI)}`;
+      return lignes;
+    }
+    const ww = w - 1;
+    switch (e.ecran) {
+      case "chargement":
+        return centre([...etat(e, ww)], "", ww, h);
+      case "connexion":
+        return ecranConnexion(e, ww, h);
+      case "navigateur":
+        return ecranNavigateur(e, ww, h);
+      case "cle":
+        return ecranCle(e, ww, h);
+      case "projet-defaut":
+        return ecranProjetDefaut(e, d, ww, h);
+      case "notifications":
+        return ecranNotifications(e, ww, h);
+      default:
+        return ecranPrincipal(e, d, ww, h, minScore);
+    }
+  }
+
+  return { rendre, heure };
+}
+
+// ---- interface.mjs
+// L'interface plein écran : `postship` tapé seul dans un terminal. Une
+// fenêtre à elle (l'écran alternatif, comme vim ou htop).
+//
+// Au premier lancement, un accueil guidé : se connecter (le navigateur de
+// cet ordinateur, ou une clé d'API collée), choisir le projet par défaut,
+// les notifications du bureau. Ensuite, deux panneaux : les projets à
+// gauche — ceux qui ont un incident en tête, `f` pour filtrer —, le projet
+// choisi à droite, en cinq vues. Tab passe au panneau de droite pour agir
+// sur une ligne (vérifier ou ouvrir une adresse). Toutes les 30 s, les
+// projets sont relus ; un incident qui s'ouvre ou se ferme, un ship qui
+// vient d'être vérifié, passent dans la ligne du bas avec une sonnerie.
+//
+// Ce fichier ne fait que piloter : l'écran (ui/ecran.mjs), les données
+// (ui/donnees.mjs) et le rendu (ui/vues.mjs) vivent à côté.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/** Les commandes qui quittent l'interface pour s'exécuter dans le terminal : elles y lisent le clavier, ou remplacent la CLI. */
+const COMMANDES_TERMINAL_UI = new Set(["update", "uninstall", "init", "watch", "completion"]);
+const COMMANDES_PROJET_UI = new Set(["status", "check", "incidents", "ship", "ships", "urls", "wait", "gate", "open"]);
+const SORTIE_MAX_UI = 2000;
+
 /**
  * Lance l'interface. `commandes` : les fonctions de la CLI (postship.mjs
  * les passe). Rend null en quittant, ou la ligne de commande à exécuter
- * dans le terminal (update, uninstall, init…).
+ * ensuite dans le terminal (update, uninstall, init…).
  */
 function lancerInterface(commandes, { entree = process.stdin, sortie = process.stdout, intervalle = 30_000, detecter = true } = {}) {
   const L = langue();
   const U = unicode();
-  const B = U ? { v: "│", h: "─" } : { v: "|", h: "-" };
-  const ROUE = U ? ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] : ["|", "/", "-", "\\"];
-  const ecrireEcran = sortie.write.bind(sortie);
+  const ecran = creerEcran(sortie);
+  const donnees = creerDonnees();
+  const d = donnees.d;
+  const vues = creerVues({ L, U });
   const config = lireConfig();
   const machine = nomMachine();
+  const minScore = lireMinScore(undefined);
 
   const e = {
     ecran: "chargement",
     methode: 0,
     saisie: "",
-    email: "",
     demande: null,
     occupe: null,
     message: null,
     erreur: null,
-    jetonConnexion: null,
     choix: 0,
-    moi: null,
-    projets: [],
-    ouverts: new Map(),
-    details: new Map(),
-    majLe: null,
-    horsLigne: null,
-    sel: 0,
+    selId: null,
     vue: "apercu",
+    focus: "projets",
+    ligne: 0,
+    filtre: "",
+    filtreEdition: false,
     sortie: [],
     defil: 0,
     journal: [],
@@ -1825,13 +2123,13 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
     flash: null,
     action: null,
     image: 0,
-    precedent: [],
     versionDispo: null,
     fin: false,
-    suite: null,
   };
-  /** Quitte l'interface ; `suite` : la commande à lancer ensuite dans le terminal. */
   let quitter = (suite = null) => void suite;
+  let jetonConnexion = null;
+  let animation = null;
+  let delaiDetails = null;
 
   // --- les sorties des commandes, capturées dans la vue Sortie ----------
 
@@ -1840,32 +2138,36 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
   const origines = { log: console.log, error: console.error, out: process.stdout.write, err: process.stderr.write, roue: process.env.POSTSHIP_NO_SPINNER };
   process.env.POSTSHIP_NO_SPINNER = "1";
   const capturer = (...a) => {
-    if (muet()) return;
+    if (muet() || e.fin) return;
     for (const l of a.join(" ").split("\n")) e.sortie.push(masquer(l));
-    if (e.sortie.length > 2000) e.sortie.splice(0, e.sortie.length - 2000);
+    if (e.sortie.length > SORTIE_MAX_UI) e.sortie.splice(0, e.sortie.length - SORTIE_MAX_UI);
     dessiner();
   };
   console.log = capturer;
   console.error = capturer;
-  // Une commande qui écrirait directement (sonnerie, effacement) ne doit pas griffer l'écran.
+  // Une commande qui écrirait directement ne griffe pas l'écran ; seule la sonnerie passe.
   process.stdout.write = function (morceau, ...reste) {
     if (sortie !== process.stdout) return origines.out.call(process.stdout, morceau, ...reste);
-    const s = String(morceau);
-    if (s === "\x07") return origines.out.call(process.stdout, s);
-    return true;
+    return String(morceau) === "\x07" ? origines.out.call(process.stdout, "\x07") : true;
   };
   process.stderr.write = function (morceau) {
-    if (String(morceau) === "\x07") return origines.err.call(process.stderr, morceau);
-    return true;
+    return String(morceau) === "\x07" ? origines.err.call(process.stderr, "\x07") : true;
   };
 
-  // --- la composition de l'écran -----------------------------------------
+  // --- le dessin -----------------------------------------------------------
 
-  const W = () => Math.max(20, sortie.columns || 80);
-  const H = () => Math.max(8, sortie.rows || 24);
-  const heure = (ms) => new Date(ms).toLocaleTimeString(L === "fr" ? "fr-FR" : "en-GB", { hour: "2-digit", minute: "2-digit" });
-  const projetChoisi = () => e.projets[e.sel] ?? null;
-  const touche = (k, texte) => `${peindre("bold", k)} ${peindre("dim", texte)}`;
+  let prevu = false;
+  function dessiner() {
+    if (e.fin || prevu) return;
+    // Une seule recomposition par tour de boucle, même après dix changements.
+    prevu = true;
+    queueMicrotask(() => {
+      prevu = false;
+      if (e.fin) return;
+      const { w, h } = ecran.taille();
+      ecran.peindre(vues.rendre(e, d, w, h, minScore), h);
+    });
+  }
 
   function flash(texte, ms = 5000) {
     e.flash = { texte, jusqua: Date.now() + ms };
@@ -1873,406 +2175,77 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
     setTimeout(() => dessiner(), ms + 50).unref?.();
   }
 
-  const largeurBloc = () => Math.min(72, W() - 5);
-  /** Un paragraphe replié à la largeur du bloc, d'une seule couleur. */
-  const para = (texte, couleur) => plier(texte, largeurBloc()).map((l) => (couleur ? peindre(couleur, l) : l));
-
-  /** Un bloc centré (accueil, connexion, réglages) : titre, lignes, aide du bas. */
-  function ecranCentre(lignesBloc, pied) {
-    const w = W() - 1;
-    const h = H();
-    const largeurBloc = Math.min(72, w - 4);
-    const marge = " ".repeat(Math.max(1, Math.floor((w - largeurBloc) / 2)));
-    const tete = [`${peindre("signal", peindre("bold", "<>"))} ${peindre("bold", "postship")}`, peindre("dim", t("Vos déploiements, vérifiés depuis le terminal.", "Your deploys, checked from the terminal.")), "", ""];
-    const bloc = [...tete, ...lignesBloc];
-    const haut = Math.max(1, Math.floor((h - bloc.length - 2) / 2));
-    const lignes = new Array(h).fill("");
-    bloc.forEach((l, i) => {
-      if (haut + i < h - 2) lignes[haut + i] = marge + tronquer(l, largeurBloc);
-    });
-    if (pied) lignes[h - 1] = ` ${tronquer(pied, w - 2)}`;
-    return lignes;
+  function occuper(texte) {
+    e.occupe = texte;
+    if (texte) e.erreur = null;
+    clearInterval(animation);
+    animation = texte
+      ? setInterval(() => {
+          e.image++;
+          dessiner();
+        }, 100)
+      : null;
+    dessiner();
   }
 
-  function liste(options, index) {
-    return options.map((o, i) => {
-      const actif = i === index;
-      const texte = `${actif ? peindre("signal", U ? "›" : ">") : " "} ${actif ? peindre("bold", o) : o}`;
-      return actif ? surFond("choix", ` ${completer(texte, 44)} `) : ` ${texte}`;
-    });
+  // --- le projet choisi ------------------------------------------------------
+
+  const affiches = () => projetsAffiches(e, d);
+  const projetChoisi = () => affiches().find((p) => p.id === e.selId) ?? null;
+
+  /** Garde un projet choisi qui existe dans la liste affichée (après un relevé, un filtre). */
+  function recaler() {
+    const liste = affiches();
+    if (!liste.some((p) => p.id === e.selId)) e.selId = liste[0]?.id ?? null;
   }
 
-  function champ(valeur, masque = false) {
-    const affiche = masque ? (U ? "•" : "*").repeat(Math.min(valeur.length, 40)) : valeur;
-    const curseur = couleursActives() ? "\x1b[7m \x1b[27m" : "_";
-    return [`  ${affiche}${curseur}`, `  ${peindre("trait", B.h.repeat(46))}`];
+  /** Le détail du projet choisi, lu après un court repos : parcourir la liste ne lance pas dix lectures. */
+  function detailsBientot(forcer = false) {
+    clearTimeout(delaiDetails);
+    delaiDetails = setTimeout(() => {
+      donnees.chargerDetails(projetChoisi(), forcer).then(dessiner, dessiner);
+    }, 120);
+    delaiDetails.unref?.();
   }
 
-  function ligneEtat() {
-    if (e.occupe) return [`  ${peindre("signal", ROUE[e.image % ROUE.length])} ${e.occupe}`];
-    if (e.erreur) return para(`${U ? "×" : "x"} ${e.erreur}`, "red");
-    if (e.message) return para(e.message, "dim");
-    return [];
-  }
+  // --- le relevé en direct ---------------------------------------------------
 
-  function ecranConnexion() {
-    const pied = `${touche(U ? "↑↓" : "Up/Down", t("choisir", "choose"))}   ${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche("q", t("quitter", "quit"))}`;
-    return ecranCentre([...para(t("Comment voulez-vous vous connecter ?", "How do you want to sign in?")), "", ...liste(METHODES.map((m) => m[L]), e.methode), "", ...ligneEtat()], pied);
-  }
-
-  function ecranAppareil(qr) {
-    const d = e.demande;
-    const pied = `${touche(t("Échap", "Esc"), t("revenir", "back"))}   ${touche("q", t("quitter", "quit"))}`;
-    if (!d) return ecranCentre([...ligneEtat()], pied);
-    const code = peindre("signal", peindre("bold", d.userCode.split("").join(" ")));
-    const lignes = [];
-    if (qr) {
-      const dessin = couleursActives() ? dessinerQr(d.lienComplet, { profondeur: profondeur() === 24 ? 24 : 4 }) : [];
-      const tient = dessin.length > 0 && dessin.length + 11 <= H() && visible(dessin[0]).length + 8 <= W();
-      lignes.push(...para(t("Scannez ce QR code avec l'appareil photo du téléphone, puis autorisez.", "Scan this QR code with your phone's camera, then authorize.")), "");
-      if (tient) lignes.push(...dessin.map((l) => `  ${l}`), "");
-      else lignes.push(...para(t("Agrandissez la fenêtre pour voir le QR code, ou ouvrez :", "Enlarge the window to see the QR code, or open:"), "yellow"), `  ${d.lienComplet}`, "");
-      lignes.push(`${t("Le téléphone doit afficher ce code", "The phone must show this code")} :  ${code}`);
-    } else {
-      lignes.push(...para(t("Le navigateur s'ouvre sur postship.fr. Vérifiez que le code affiché est le même, puis « Autoriser ce terminal ».", "The browser opens on postship.fr. Check that the code shown is the same, then “Authorize this terminal”.")), "");
-      lignes.push(`  ${code}`, "");
-      lignes.push(...para(t("Rien ne s'ouvre ? Allez sur {0}", "Nothing opens? Go to {0}", d.lienComplet), "dim"));
-    }
-    lignes.push("", ...ligneEtat());
-    return ecranCentre(lignes, pied);
-  }
-
-  function ecranEmail() {
-    const pied = `${touche(t("Entrée", "Enter"), t("recevoir le code", "get the code"))}   ${touche(t("Échap", "Esc"), t("revenir", "back"))}`;
-    return ecranCentre([t("Votre adresse email PostShip", "Your PostShip email address"), "", ...champ(e.saisie), "", ...para(t("Le même code qu'à la connexion sur postship.fr, valable 15 minutes.", "The same code as when signing in on postship.fr, valid 15 minutes."), "dim"), "", ...ligneEtat()], pied);
-  }
-
-  function ecranCode() {
-    const pied = `${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche("r", t("renvoyer le code", "resend the code"))}   ${touche(t("Échap", "Esc"), t("changer d'adresse", "change address"))}`;
-    return ecranCentre([...para(t("Si un compte existe pour {0}, un code vient de partir. Tapez-le :", "If an account exists for {0}, a code was just sent. Type it:", e.email)), "", ...champ(e.saisie), "", ...para(t("Pensez aux indésirables. Pas encore de compte ? Créez-le sur postship.fr.", "Check your spam folder. No account yet? Create it on postship.fr."), "dim"), "", ...ligneEtat()], pied);
-  }
-
-  function ecranCle() {
-    const pied = `${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche(t("Échap", "Esc"), t("revenir", "back"))}`;
-    return ecranCentre([t("Collez votre clé d'API", "Paste your API key"), "", ...champ(e.saisie, true), "", ...para(t("Elle commence par psk_ ; créez-la dans Compte → API sur postship.fr. Elle ne s'affiche pas ici.", "It starts with psk_; create it in Account → API on postship.fr. It is not shown here."), "dim"), "", ...ligneEtat()], pied);
-  }
-
-  function ecranProjetDefaut() {
-    const options = [t("Tous les projets", "Every project"), ...e.projets.map((p) => p.name)];
-    const pied = `${touche(U ? "↑↓" : "Up/Down", t("choisir", "choose"))}   ${touche(t("Entrée", "Enter"), t("valider", "confirm"))}`;
-    return ecranCentre([...para(t("Quel projet afficher en premier ?", "Which project should open first?")), "", ...liste(options.slice(0, Math.max(3, H() - 16)), e.choix), "", ...para(t("Modifiable plus tard : / puis reglages, ou d sur un projet.", "Change it later: / then reglages, or d on a project."), "dim")], pied);
-  }
-
-  function ecranNotifications() {
-    const pied = `${touche(U ? "↑↓" : "Up/Down", t("choisir", "choose"))}   ${touche(t("Entrée", "Enter"), t("valider", "confirm"))}`;
-    return ecranCentre([...para(t("Une notification du bureau quand un incident s'ouvre ou se ferme ?", "A desktop notification when an incident opens or closes?")), "", ...liste([t("Oui", "Yes"), t("Non, la sonnerie et la ligne du bas suffisent", "No, the ring and the bottom line are enough")], e.choix), "", ...para(t("Modifiable plus tard : n dans l'interface.", "Change it later: n in the interface."), "dim")], pied);
-  }
-
-  // --- l'écran principal -------------------------------------------------
-
-  function panneauProjets(lw, n) {
-    const l = [` ${peindre("dim", t("Projets", "Projects"))}${e.projets.length ? peindre("dim", `  ${e.projets.length}`) : ""}`, ""];
-    if (e.projets.length === 0) {
-      l.push(` ${peindre("dim", t("Aucun projet.", "No project."))}`, ` ${peindre("dim", t("Créez-en un sur postship.fr", "Create one on postship.fr"))}`);
-      return l;
-    }
-    const place = n - 2;
-    const debut = Math.min(Math.max(0, e.sel - Math.floor(place / 2)), Math.max(0, e.projets.length - place));
-    for (const [i, p] of e.projets.slice(debut, debut + place).entries()) {
-      const index = debut + i;
-      const etat = p.paused ? "muted" : p.status;
-      const nb = e.ouverts.get(p.id)?.length ?? 0;
-      const droite = p.paused ? peindre("dim", t("pause", "paused")) : nb ? peindre("red", String(nb)) : "";
-      const point = peindre(TEINTE[etat] ?? "dim", p.paused ? (U ? "○" : "o") : U ? "●" : "*");
-      const marqueur = index === e.sel && !couleursActives() ? ">" : " ";
-      const nom = tronquer(p.name, lw - 6 - visible(droite).length);
-      const texte = `${marqueur}${point} ${index === e.sel ? peindre("bold", nom) : nom}`;
-      const ligne = `${completer(texte, lw - 1 - visible(droite).length)}${droite}`;
-      l.push(index === e.sel ? surFond("choix", completer(ligne, lw)) : ligne);
-    }
-    return l;
-  }
-
-  function ongletsVues() {
-    return VUES.map((v) => (v.id === e.vue ? peindre("signal", peindre("bold", v[L])) : peindre("dim", v[L]))).join("   ");
-  }
-
-  function vueApercu(p, rw) {
-    const l = [];
-    l.push(`${peindre("bold", p.name)}  ${peindre("dim", adresseCourte(p.url))}`, "");
-    const ouverts = e.ouverts.get(p.id) ?? [];
-    if (p.paused) l.push(`${symbole("muted")} ${peindre("dim", t("En pause : aucune vérification.", "Paused: no checks."))}`);
-    else if (ouverts.length === 0) l.push(`${symbole("pass")} ${peindre("green", t("Rien d'ouvert", "Nothing open"))}`);
-    else {
-      l.push(`${peindre("red", U ? "●" : "*")} ${peindre("red", ouverts.length === 1 ? t("1 incident ouvert", "1 open incident") : t("{0} incidents ouverts", "{0} open incidents", ouverts.length))}`);
-      for (const i of ouverts.slice(0, 4)) l.push(`   ${symbole(i.outcome)} ${adresseCourte(i.url)}  ${peindre("dim", i.kind ?? "")}  ${peindre("dim", t("constaté {0}", "seen {0}", relatif(i.since)))}`);
-      if (ouverts.length > 4) l.push(peindre("dim", `   ${t("… et {0} autres — 2 pour la liste", "… and {0} more — 2 for the list", ouverts.length - 4)}`));
-    }
-    l.push("");
-    const d = e.details.get(p.id);
-    const lab = (s) => peindre("dim", s.padEnd(14));
-    if (!d) l.push(peindre("dim", t("Lecture…", "Reading…")));
-    else {
-      l.push(`${lab(t("Dernier ship", "Last ship"))}${d.ship ? ligneShip(d.ship, "") : peindre("dim", t("aucun déploiement suivi", "no deploy tracked"))}`);
-      const scores = (d.ships ?? []).filter((s) => typeof s.score === "number");
-      if (scores.length > 1) l.push(`${lab(t("Historique", "History"))}${courbe([...d.ships].reverse().map((s) => s.score))}  ${peindre("dim", t("moyenne {0}", "average {0}", Math.round(scores.reduce((a, s) => a + s.score, 0) / scores.length)))}`);
-      if (d.urls) {
-        const actives = d.urls.filter((u) => u.enabled);
-        const ko = actives.filter((u) => u.outcome === "fail" || u.outcome === "error").length;
-        l.push(`${lab("URLs")}${t("{0} surveillées", "{0} monitored", actives.length)}${ko ? peindre("red", ` · ${ko} ${t("en échec", "failing")}`) : peindre("green", ` · ${t("toutes bonnes", "all good")}`)}`);
-      }
-    }
-    const evenements = e.journal.filter((x) => x.projet === p.id).slice(0, 5);
-    if (evenements.length) {
-      l.push("", peindre("dim", t("Pendant cette séance", "This session")));
-      for (const x of evenements) l.push(`${peindre("dim", x.heure)}  ${x.texte}`);
-    }
-    return l.map((x) => tronquer(x, rw));
-  }
-
-  function vueIncidents(p) {
-    const ouverts = e.ouverts.get(p.id) ?? [];
-    if (!ouverts.length) return [`${symbole("pass")} ${peindre("green", t("Rien d'ouvert sur {0}.", "Nothing open on {0}.", p.name))}`];
-    return ouverts.map((i) => `${symbole(i.outcome)} ${adresseCourte(i.url)}  ${peindre("dim", i.kind ?? "")}  ${peindre("dim", t("constaté {0}", "seen {0}", relatif(i.since)))}`);
-  }
-
-  function vueShips(p) {
-    const d = e.details.get(p.id);
-    if (!d) return [peindre("dim", t("Lecture…", "Reading…"))];
-    if (!d.ships?.length) return [peindre("dim", t("Aucun déploiement de production suivi.", "No production deploy tracked."))];
-    const l = [];
-    if (d.ships.length > 1) l.push(`${courbe([...d.ships].reverse().map((s) => s.score))}  ${peindre("dim", t("{0} derniers ships", "last {0} ships", d.ships.length))}`, "");
-    for (const s of d.ships) l.push(`${verdict(s.outcome)}  ${peindre("bold", String(s.sha ?? "").slice(0, 7) || "—")}  ${peindre("dim", (s.provider ?? "—").padEnd(8))}  ${relatif(s.at).padEnd(14)}  ${typeof s.score === "number" ? jauge(s.score) : peindre("dim", "—")}`);
-    return l;
-  }
-
-  function vueUrls(p) {
-    const d = e.details.get(p.id);
-    if (!d?.urls) return [peindre("dim", t("Lecture…", "Reading…"))];
-    if (!d.urls.length) return [peindre("dim", t("Aucune URL.", "No URL."))];
-    return d.urls.map((u) => `${verdict(u.enabled ? u.outcome : "muted")}  ${peindre("dim", String(u.kind ?? "").padEnd(12))}  ${adresseCourte(u.url)}  ${peindre("dim", relatif(u.lastCheckedAt))}`);
-  }
-
-  function vueSortie(n) {
-    if (!e.sortie.length) return [peindre("dim", t("Le résultat des commandes s'affiche ici : c vérifie le projet, / ouvre la liste des commandes.", "Command results show up here: c checks the project, / opens the command list."))];
-    const place = Math.max(1, n);
-    const fin = Math.max(0, e.sortie.length - e.defil);
-    return e.sortie.slice(Math.max(0, fin - place), fin);
-  }
-
-  function panneauDetail(rw, n) {
-    const l = [ongletsVues(), ""];
-    const p = projetChoisi();
-    if (e.vue === "sortie") l.push(...vueSortie(n - 2));
-    else if (!p) l.push(peindre("dim", t("Aucun projet à afficher.", "No project to show.")));
-    else if (e.vue === "apercu") l.push(...vueApercu(p, rw));
-    else if (e.vue === "incidents") l.push(...vueIncidents(p));
-    else if (e.vue === "ships") l.push(...vueShips(p));
-    else if (e.vue === "urls") l.push(...vueUrls(p));
-    return l.slice(0, n).map((x) => tronquer(x, rw));
-  }
-
-  function piedDePage(w) {
-    if (e.palette) {
-      const curseur = couleursActives() ? "\x1b[7m \x1b[27m" : "_";
-      const droite = peindre("dim", `${t("Entrée", "Enter")} ${t("lancer", "run")} · Tab ${t("compléter", "complete")} · ${t("Échap", "Esc")} ${t("fermer", "close")}`);
-      const gauche = ` ${peindre("signal", "/")}${e.saisie}${curseur}`;
-      return `${completer(tronquer(gauche, w - visible(droite).length - 2), w - visible(droite).length - 1)}${droite}`;
-    }
-    if (e.action) {
-      const gauche = ` ${peindre("signal", ROUE[e.image % ROUE.length])} ${e.action.libelle}`;
-      const droite = peindre("dim", t("Échap annule", "Esc cancels"));
-      return `${completer(tronquer(gauche, w - 16), w - visible(droite).length - 1)}${droite}`;
-    }
-    if (e.flash && Date.now() < e.flash.jusqua) return ` ${tronquer(e.flash.texte, w - 2)}`;
-    const toujours = [touche("?", t("aide", "help")), touche("q", t("quitter", "quit"))];
-    const raccourcis = [
-      touche(U ? "↑↓" : "Up/Dn", t("projet", "project")),
-      touche(U ? "←→" : "Left/Right", t("vue", "view")),
-      touche("c", t("vérifier", "check")),
-      touche("w", t("attendre le ship", "wait for the ship")),
-      touche("o", t("ouvrir", "open")),
-      touche("/", t("commande", "command")),
-      touche("r", t("relire", "refresh")),
-    ];
-    const pris = [];
-    for (const r of raccourcis) {
-      if (visible([...pris, r, ...toujours].join("   ")).length + 2 > w) break;
-      pris.push(r);
-    }
-    return ` ${[...pris, ...toujours].join("   ")}`;
-  }
-
-  function ecranPrincipal() {
-    const w = W() - 1;
-    const h = H();
-    const lignes = [];
-    const gauche = ` ${peindre("signal", peindre("bold", "<>"))} ${peindre("bold", "postship")}`;
-    // Du plus utile au moins utile : ce qui ne tient pas tombe par la fin.
-    const infos = [];
-    if (e.versionDispo) infos.push(peindre("yellow", t("{0} disponible — /update", "{0} available — /update", e.versionDispo)));
-    infos.push(e.horsLigne ? peindre("yellow", t("hors ligne", "offline")) : e.majLe ? peindre("dim", t("à jour à {0}", "as of {0}", heure(e.majLe))) : peindre("dim", t("lecture…", "reading…")));
-    if (e.moi) infos.push(peindre("dim", nomPlan(e.moi.plan)), peindre("dim", `${e.moi.quota.used}/${e.moi.quota.limit} ${t("vérifications", "checks")}`));
-    if (e.notifications) infos.push(peindre("dim", t("notifications", "notifications")));
-    const place = w - visible(gauche).length - 3;
-    while (infos.length > 1 && visible(infos.join(" · ")).length > place) infos.pop();
-    const droite = tronquer(infos.join(peindre("dim", " · ")), Math.max(0, place));
-    lignes.push(`${completer(gauche, w - visible(droite).length - 1)}${droite} `);
-    lignes.push(peindre("trait", B.h.repeat(w)));
-    const corps = h - 4;
-    const lw = Math.max(24, Math.min(38, Math.floor(w * 0.28)));
-    const rw = w - lw - 3;
-    const g = panneauProjets(lw, corps);
-    const d = panneauDetail(rw, corps);
-    for (let i = 0; i < corps; i++) lignes.push(`${completer(tronquer(g[i] ?? "", lw), lw)} ${peindre("trait", B.v)} ${d[i] ?? ""}`);
-    lignes.push(peindre("trait", B.h.repeat(w)));
-    lignes.push(piedDePage(w));
-
-    // La liste des commandes, au-dessus du trait du bas.
-    if (e.palette && e.menu.length) {
-      const place = Math.min(8, corps - 1, e.menu.length);
-      const debut = Math.min(Math.max(0, e.selMenu - place + 1), Math.max(0, e.menu.length - place));
-      const vus = e.menu.slice(debut, debut + place);
-      const largNom = Math.min(24, Math.max(...vus.map((x) => x.nom.length)) + 2);
-      vus.forEach((x, i) => {
-        const actif = debut + i === e.selMenu;
-        const texte = ` ${actif ? peindre("signal", U ? "›" : ">") : " "} ${peindre("bold", x.nom.padEnd(largNom))} ${peindre("dim", x.texte)}`;
-        const ligne = completer(tronquer(texte, w), w);
-        lignes[h - 2 - place + i] = actif ? surFond("choix", ligne) : ligne;
-      });
-    }
-
-    // L'aide : un bandeau au milieu, qui se ferme à la première touche.
-    if (e.aide) {
-      const col = (k, v) => `${peindre("bold", k.padEnd(8))}${peindre("dim", v)}`;
-      const gaucheA = [col(U ? "↑ ↓" : "Up Dn", t("choisir un projet", "choose a project")), col(U ? "← →" : "Lt Rt", t("changer de vue", "switch view")), col("1-5", t("aller à une vue", "go to a view")), col("PgUp/Dn", t("défiler la sortie", "scroll the output")), col("/", t("taper une commande", "type a command")), col(t("Échap", "Esc"), t("annuler, fermer", "cancel, close"))];
-      const droiteA = [col("c", t("vérifier le projet (1 du quota)", "check the project (1 of quota)")), col("w", t("attendre le prochain ship", "wait for the next ship")), col("o", t("ouvrir dans le navigateur", "open in the browser")), col("r", t("relire maintenant", "read now")), col("d", t("projet par défaut", "default project")), col("n", t("notifications du bureau", "desktop notifications"))];
-      const bloc = [peindre("bold", t("Raccourcis", "Shortcuts")), ""];
-      for (let i = 0; i < gaucheA.length; i++) bloc.push(`${completer(gaucheA[i], 34)}${droiteA[i] ?? ""}`);
-      bloc.push("", peindre("dim", t("/ puis une commande : check example.com, wait --head, ships, whoami, logout, update…", "/ then a command: check example.com, wait --head, ships, whoami, logout, update…")), peindre("dim", t("q quitte l'interface. Une touche ferme cette aide.", "q quits the interface. Any key closes this help.")));
-      const haut = Math.max(2, Math.floor((h - bloc.length) / 2) - 1);
-      const marge = " ".repeat(Math.max(2, Math.floor((w - 76) / 2)));
-      lignes[haut - 1] = peindre("trait", B.h.repeat(w));
-      bloc.forEach((b, i) => (lignes[haut + i] = completer(`${marge}${tronquer(b, w - marge.length)}`, w)));
-      lignes[haut + bloc.length] = peindre("trait", B.h.repeat(w));
-    }
-    return lignes;
-  }
-
-  function composer() {
-    if (W() < LARGEUR_MIN || H() < HAUTEUR_MIN) {
-      const lignes = new Array(H()).fill("");
-      lignes[Math.floor(H() / 2) - 1] = ` ${peindre("bold", "postship")}`;
-      lignes[Math.floor(H() / 2)] = ` ${t("Agrandissez la fenêtre ({0} × {1} au moins).", "Enlarge the window ({0} × {1} at least).", LARGEUR_MIN, HAUTEUR_MIN)}`;
-      return lignes;
-    }
-    switch (e.ecran) {
-      case "chargement":
-        return ecranCentre([...ligneEtat()], "");
-      case "connexion":
-        return ecranConnexion();
-      case "navigateur":
-        return ecranAppareil(false);
-      case "qr":
-        return ecranAppareil(true);
-      case "email":
-        return ecranEmail();
-      case "code":
-        return ecranCode();
-      case "cle":
-        return ecranCle();
-      case "projet-defaut":
-        return ecranProjetDefaut();
-      case "notifications":
-        return ecranNotifications();
-      default:
-        return ecranPrincipal();
-    }
-  }
-
-  let prevue = false;
-  function dessiner() {
-    if (e.fin || prevue) return;
-    // Une seule recomposition par tour de boucle, même après dix changements.
-    prevue = true;
-    queueMicrotask(() => {
-      prevue = false;
-      if (e.fin) return;
-      const lignes = composer();
-      let s = "\x1b[?2026h";
-      for (let i = 0; i < H(); i++) {
-        const l = lignes[i] ?? "";
-        if (e.precedent[i] === l) continue;
-        s += `\x1b[${i + 1};1H${l}\x1b[0m\x1b[K`;
-      }
-      s += "\x1b[?2026l";
-      e.precedent = lignes.slice(0, H());
-      ecrireEcran(s);
-    });
-  }
-
-  // --- les données en direct -------------------------------------------
-
-  async function rafraichir(annoncer = true) {
+  async function relever(annoncer = true) {
     if (e.fin || !lireJeton()) return;
-    try {
-      const [moi, listeP] = await Promise.all([appelAuthentifie("GET", "/api/v1/me"), appelAuthentifie("GET", "/api/v1/projects")]);
-      const projets = listeP?.projects ?? [];
-      const suivis = projets.filter((p) => !p.paused).slice(0, PROJETS_SUIVIS_INTERFACE);
-      const lus = await Promise.all(suivis.map((p) => appelAuthentifie("GET", `/api/v1/projects/${encodeURIComponent(p.id)}/incidents`).catch(() => null)));
-      const ouverts = new Map(suivis.map((p, i) => [p.id, lus[i] ? (lus[i].incidents ?? []) : (e.ouverts.get(p.id) ?? [])]));
-      if (annoncer && e.moi) {
-        const cle = (i) => `${i.url}|${i.kind ?? ""}`;
-        const titres = [];
-        for (const p of suivis) {
-          if (!e.ouverts.has(p.id)) continue;
-          const avant = new Set((e.ouverts.get(p.id) ?? []).map(cle));
-          const apres = new Set((ouverts.get(p.id) ?? []).map(cle));
-          for (const i of ouverts.get(p.id) ?? []) {
-            if (avant.has(cle(i))) continue;
-            const texte = `${symbole("fail")} ${peindre("red", t("incident ouvert", "incident opened"))}  ${adresseCourte(i.url)}`;
-            e.journal.unshift({ projet: p.id, heure: heure(Date.now()), texte });
-            titres.push({ texte: `${texte} ${peindre("dim", `· ${p.name}`)}`, brut: adresseCourte(i.url), ouvert: true });
-          }
-          for (const i of e.ouverts.get(p.id) ?? []) {
-            if (apres.has(cle(i))) continue;
-            const texte = `${symbole("pass")} ${peindre("green", t("résolu", "resolved"))}  ${adresseCourte(i.url)}`;
-            e.journal.unshift({ projet: p.id, heure: heure(Date.now()), texte });
-            titres.push({ texte: `${texte} ${peindre("dim", `· ${p.name}`)}`, brut: adresseCourte(i.url), ouvert: false });
-          }
-        }
-        e.journal.splice(50);
-        if (titres.length) {
-          sonner();
-          flash(titres.map((x) => x.texte).join("   "), 15_000);
-          if (e.notifications) notifierBureau(titres.some((x) => x.ouvert) ? t("PostShip — incident ouvert", "PostShip — incident opened") : t("PostShip — incident résolu", "PostShip — incident resolved"), titres.map((x) => x.brut).join(", "));
-        }
-      }
-      const choisi = projetChoisi()?.id;
-      Object.assign(e, { moi, projets, ouverts, majLe: Date.now(), horsLigne: null });
-      if (choisi) e.sel = Math.max(0, e.projets.findIndex((p) => p.id === choisi));
-      if (e.sel >= e.projets.length) e.sel = Math.max(0, e.projets.length - 1);
-    } catch (err) {
-      if (err?.status === 401) {
-        // Clé révoquée ou expirée : retour à la connexion, avec la raison.
-        Object.assign(e, { moi: null, ecran: "connexion", erreur: t("Votre clé n'est plus acceptée : reconnectez ce terminal.", "Your key is no longer accepted: sign this terminal in again.") });
-      } else e.horsLigne = err?.message ?? String(err);
+    const r = await donnees.rafraichir({ annoncer });
+    if (e.fin) return;
+    if (r.refuse) {
+      // Clé révoquée ou expirée : retour à la connexion, avec la raison.
+      donnees.oublier();
+      Object.assign(e, { ecran: "connexion", methode: 0, erreur: t("Votre clé n'est plus acceptée : reconnectez ce terminal.", "Your key is no longer accepted: sign this terminal in again.") });
+      return dessiner();
     }
+    recaler();
+    if (r.evenements.length) annoncerEvenements(r.evenements);
     dessiner();
   }
 
-  async function chargerDetails(p, forcer = false) {
-    if (!p || e.fin) return;
-    const d = e.details.get(p.id);
-    if (d && !forcer && Date.now() - d.lu < 60_000) return;
-    const id = encodeURIComponent(p.id);
-    const [ls, sh, pr] = await Promise.all([
-      appelAuthentifie("GET", `/api/v1/projects/${id}/last-ship`).catch(() => null),
-      appelAuthentifie("GET", `/api/v1/projects/${id}/ships?limit=20`).catch(() => null),
-      appelAuthentifie("GET", `/api/v1/projects/${id}`).catch(() => null),
-    ]);
-    e.details.set(p.id, { ship: ls?.lastShip ?? null, ships: sh?.ships ?? [], urls: pr?.project?.urls ?? null, lu: Date.now() });
-    dessiner();
+  function annoncerEvenements(evenements) {
+    const h = vues.heure(Date.now());
+    const textes = [];
+    for (const ev of evenements) {
+      let texte;
+      if (ev.type === "ouvert") texte = `${symbole("fail")} ${peindre("red", t("incident ouvert", "incident opened"))}  ${adresseCourte(ev.url)}`;
+      else if (ev.type === "resolu") texte = `${symbole("pass")} ${peindre("green", t("résolu", "resolved"))}  ${adresseCourte(ev.url)}`;
+      else {
+        const echec = ev.ship.outcome === "fail" || ev.ship.outcome === "error";
+        const sha = String(ev.ship.sha ?? "").slice(0, 7) || "—";
+        texte = echec
+          ? `${symbole("fail")} ${peindre("red", t("ship {0} en échec", "ship {0} failed", sha))}${typeof ev.ship.score === "number" ? peindre("dim", ` · ${ev.ship.score}`) : ""}`
+          : `${symbole("pass")} ${peindre("green", t("ship {0} vérifié", "ship {0} checked", sha))}${typeof ev.ship.score === "number" ? peindre("dim", ` · ${ev.ship.score}`) : ""}`;
+      }
+      e.journal.unshift({ projet: ev.projet.id, heure: h, texte });
+      textes.push({ texte: `${texte} ${peindre("dim", `· ${ev.projet.name}`)}`, brut: `${ev.projet.name} — ${ev.type === "ship" ? `ship ${String(ev.ship.sha ?? "").slice(0, 7)} ${ev.ship.outcome}` : adresseCourte(ev.url)}` });
+    }
+    e.journal.splice(50);
+    sonner();
+    flash(textes.map((x) => x.texte).join("   "), 15_000);
+    if (e.notifications) notifierBureau(t("PostShip — {0} changement(s)", "PostShip — {0} change(s)", textes.length), textes.map((x) => x.brut).join(" · "));
   }
 
   // --- la connexion ------------------------------------------------------
@@ -2288,42 +2261,28 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
       });
   }
 
-  let animation = null;
-  function occuper(texte) {
-    e.occupe = texte;
-    e.erreur = null;
-    clearInterval(animation);
-    if (texte) {
-      animation = setInterval(() => {
-        e.image++;
-        dessiner();
-      }, 100);
-    }
-    dessiner();
-  }
-
   function annulerConnexion() {
-    if (e.jetonConnexion) {
-      e.jetonConnexion.annule = true;
-      e.jetonConnexion.reveil?.();
+    if (jetonConnexion) {
+      jetonConnexion.annule = true;
+      jetonConnexion.reveil?.();
     }
-    e.jetonConnexion = null;
+    jetonConnexion = null;
     occuper(null);
   }
 
-  async function connexionAppareil(qr) {
+  async function connexionNavigateur() {
     annulerConnexion();
-    Object.assign(e, { ecran: qr ? "qr" : "navigateur", demande: null, erreur: null, message: null });
+    Object.assign(e, { ecran: "navigateur", demande: null, erreur: null, message: null });
     const jeton = { annule: false };
-    e.jetonConnexion = jeton;
+    jetonConnexion = jeton;
     occuper(t("Demande d'un code…", "Requesting a code…"));
     try {
-      const d = await demarrerAppareil(machine);
+      const dm = await demarrerAppareil(machine);
       if (jeton.annule) return;
-      e.demande = d;
-      if (!qr && !ouvrirNavigateur(d.lienComplet)) e.message = t("Le navigateur ne s'est pas ouvert : copiez l'adresse.", "The browser did not open: copy the address.");
+      e.demande = dm;
+      if (!ouvrirNavigateur(dm.lienComplet)) e.message = t("Le navigateur ne s'est pas ouvert : copiez l'adresse.", "The browser did not open: copy the address.");
       occuper(t("En attente de l'autorisation…", "Waiting for the authorization…"));
-      const r = await attendreAppareil(d, { dormir: dormirAnnulable(jeton), annule: () => jeton.annule });
+      const r = await attendreAppareil(dm, { dormir: dormirAnnulable(jeton), annule: () => jeton.annule });
       if (jeton.annule) return;
       enregistrerConnexion({ ...r, machine });
       await apresConnexion();
@@ -2337,16 +2296,12 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
 
   async function apresConnexion() {
     occuper(t("Lecture de vos projets…", "Reading your projects…"));
-    await rafraichir(false);
+    donnees.oublier();
+    await relever(false);
     occuper(null);
     if (e.ecran === "connexion") return;
-    const cfg = lireConfig();
-    if (!cfg.accueilFait) {
-      e.choix = Math.max(0, e.projets.findIndex((p) => p.id === e.projetDefaut) + 1);
-      e.ecran = e.projets.length ? "projet-defaut" : "notifications";
-      if (e.ecran === "notifications") e.choix = e.notifications ? 0 : 1;
-    } else versPrincipal();
-    dessiner();
+    if (!lireConfig().accueilFait) versReglages();
+    else versPrincipal();
   }
 
   function enregistrerReglages(valeurs) {
@@ -2357,35 +2312,41 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
     }
   }
 
+  function versReglages() {
+    const liste = trierProjets(d.projets, d.ouverts);
+    e.choix = Math.max(0, liste.findIndex((p) => p.id === e.projetDefaut) + 1);
+    e.ecran = d.projets.length ? "projet-defaut" : "notifications";
+    if (e.ecran === "notifications") e.choix = e.notifications ? 0 : 1;
+    dessiner();
+  }
+
   function versPrincipal() {
     e.ecran = "principal";
-    const i = e.projets.findIndex((p) => p.id === e.projetDefaut || String(p.id).startsWith(String(e.projetDefaut)));
-    if (i >= 0) e.sel = i;
-    void chargerDetails(projetChoisi());
+    e.focus = "projets";
+    e.selId = d.projets.some((p) => p.id === e.projetDefaut) ? e.projetDefaut : null;
+    recaler();
+    detailsBientot();
     dessiner();
   }
 
   // --- les commandes -------------------------------------------------------
 
   async function executer(nom, args, libelle) {
-    if (e.action) {
-      flash(t("Une action est déjà en cours : Échap l'annule.", "An action is already running: Esc cancels it."));
-      return;
-    }
+    if (e.action) return flash(t("Une action est déjà en cours : Échap l'annule.", "An action is already running: Esc cancels it."));
     const fn = nom === "aide" ? commandes.help : commandes[nom];
     if (!fn) return;
     const jeton = { annule: false };
     e.action = { libelle, jeton };
-    e.vue = "sortie";
-    e.defil = 0;
+    Object.assign(e, { vue: "sortie", defil: 0, focus: "projets" });
     e.sortie.push("", `${peindre("signal", U ? "›" : ">")} ${peindre("bold", masquer(libelle))}`);
     const animationAction = setInterval(() => {
       e.image++;
       dessiner();
     }, 100);
     dessiner();
+    let resultat;
     try {
-      const r = await new Promise((resolve, reject) => {
+      resultat = await new Promise((resolve, reject) => {
         jeton.lacher = () => resolve("annule");
         als.run(jeton, () => {
           Promise.resolve()
@@ -2393,18 +2354,21 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
             .then(resolve, reject);
         });
       });
-      if (r === "annule") e.sortie.push(peindre("dim", t("Annulé.", "Cancelled.")));
+      if (resultat === "annule") e.sortie.push(peindre("dim", t("Annulé.", "Cancelled.")));
     } catch (err) {
+      resultat = "erreur";
       if (!jeton.annule) e.sortie.push(peindre("red", masquer(err?.message ?? String(err))));
     } finally {
       clearInterval(animationAction);
       e.action = null;
     }
-    if (nom === "logout") {
-      Object.assign(e, { moi: null, projets: [], ouverts: new Map(), details: new Map(), ecran: "connexion", methode: 0 });
-    } else if (["check", "wait", "gate", "status"].includes(nom)) {
-      void rafraichir(true);
-      void chargerDetails(projetChoisi(), true);
+    // Déconnecté seulement si la déconnexion a réussi : une clé posée dans POSTSHIP_TOKEN reste là.
+    if (nom === "logout" && resultat === 0 && !lireJeton()) {
+      donnees.oublier();
+      Object.assign(e, { ecran: "connexion", methode: 0 });
+    } else if (["check", "wait", "gate"].includes(nom)) {
+      void relever(true);
+      detailsBientot(true);
     }
     dessiner();
   }
@@ -2440,11 +2404,10 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
         e.sortie = [];
         return dessiner();
       case "projet": {
-        const p = trouverProjet(e.projets, reste.join(" "));
+        const p = trouverProjet(d.projets, reste.join(" "));
         if (!p) return flash(peindre("yellow", t("Aucun projet ne répond à « {0} ».", "No project matches “{0}”.", reste.join(" "))));
-        e.sel = e.projets.indexOf(p);
-        e.vue = "apercu";
-        void chargerDetails(p);
+        Object.assign(e, { filtre: "", selId: p.id, vue: "apercu", focus: "projets" });
+        detailsBientot();
         return dessiner();
       }
       case "notifier": {
@@ -2458,36 +2421,36 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
         const choix = v === "clair" || v === "light" ? "clair" : v === "sombre" || v === "dark" ? "sombre" : null;
         enregistrerReglages({ theme: choix ?? undefined });
         definirTheme(choix ?? "neutre");
-        e.precedent = [];
+        ecran.invalider();
         return flash(choix ? t("Couleurs pour un terminal {0}.", "Colours for a {0} terminal.", choix) : t("Couleurs automatiques.", "Automatic colours."));
       }
       case "reglages":
-        e.choix = Math.max(0, e.projets.findIndex((p) => p.id === e.projetDefaut) + 1);
-        e.ecran = e.projets.length ? "projet-defaut" : "notifications";
-        return dessiner();
+        return versReglages();
       case "login":
         Object.assign(e, { ecran: "connexion", methode: 0, erreur: null, message: null });
         return dessiner();
       default:
         break;
     }
-    if (DANS_LE_TERMINAL.has(nom) || HORS_CONSOLE.has(nom)) return quitter([nom, ...reste]);
+    if (COMMANDES_TERMINAL_UI.has(nom) || HORS_CONSOLE.has(nom)) return quitter([nom, ...reste]);
     if (!commandes[nom]) return flash(peindre("yellow", t("Commande inconnue : {0}. / pour la liste.", "Unknown command: {0}. / for the list.", argv[0])));
     const args = parseArgs([nom, ...reste]);
     if (args.token !== undefined) return flash(peindre("yellow", t("--token n'existe pas.", "--token does not exist.")));
-    if (AVEC_PROJET_INTERFACE.has(nom) && args.project === undefined && projetChoisi()) args.project = projetChoisi().id;
+    if (COMMANDES_PROJET_UI.has(nom) && args.project === undefined && projetChoisi()) args.project = projetChoisi().id;
     void executer(nom, args, ligne.replace(/^\//, ""));
   }
 
-  function ouvrirProjet() {
-    const p = projetChoisi();
-    if (!p) return;
-    const suffixe = { apercu: "", incidents: "/incidents", ships: "/deploys", urls: "/urls", sortie: "" }[e.vue] ?? "";
-    const url = `${baseUrl()}/${encodeURIComponent(p.id)}${suffixe}`;
+  /** L'adresse de l'app pour le projet et la vue courante. */
+  function adresseApp(p, vue = e.vue) {
+    const suffixe = { incidents: "/incidents", ships: "/deploys", urls: "/urls" }[vue] ?? "";
+    return `${baseUrl()}/${encodeURIComponent(p.id)}${suffixe}`;
+  }
+
+  function ouvrir(url) {
     flash(ouvrirNavigateur(url) ? t("Ouvert dans le navigateur : {0}", "Opened in the browser: {0}", url) : t("Ouvrez : {0}", "Open: {0}", url), 8000);
   }
 
-  // --- le clavier ----------------------------------------------------------
+  // --- le clavier ------------------------------------------------------------
 
   function editer(touche) {
     if (touche.nom === "backspace") e.saisie = e.saisie.slice(0, -1);
@@ -2498,203 +2461,171 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
     return true;
   }
 
-  function surTouche(touche) {
+  function toucheConnexion(touche) {
     const nom = touche.nom;
-    const ctrlC = touche.ctrl && nom === "c";
-    // Ctrl+C : annule ce qui tourne, sinon quitte.
-    if (ctrlC && e.action) return annulerAction();
-    if (ctrlC) return quitter();
-
-    switch (e.ecran) {
-      case "connexion": {
-        if (nom === "up") e.methode = (e.methode + METHODES.length - 1) % METHODES.length;
-        else if (nom === "down" || nom === "tab") e.methode = (e.methode + 1) % METHODES.length;
-        else if (touche.texte === "q") return quitter();
-        else if (nom === "return") {
-          const m = METHODES[e.methode].id;
-          e.erreur = null;
-          e.message = null;
-          if (m === "navigateur" || m === "qr") return void connexionAppareil(m === "qr");
-          e.saisie = "";
-          e.ecran = m === "email" ? "email" : "cle";
-        }
-        return dessiner();
+    if (e.ecran === "connexion") {
+      if (nom === "up" || nom === "down" || nom === "tab") e.methode = (e.methode + 1) % METHODES_UI.length;
+      else if (touche.texte === "q") return quitter();
+      else if (nom === "return") {
+        Object.assign(e, { erreur: null, message: null, saisie: "" });
+        if (METHODES_UI[e.methode].id === "navigateur") return void connexionNavigateur();
+        e.ecran = "cle";
       }
-      case "navigateur":
-      case "qr":
-        if (nom === "escape") {
-          annulerConnexion();
-          e.ecran = "connexion";
-        } else if (touche.texte === "q") return quitter();
-        else if (nom === "return" && e.erreur) return void connexionAppareil(e.ecran === "qr");
-        return dessiner();
-      case "email":
-        if (nom === "escape") {
-          e.ecran = "connexion";
-          e.erreur = null;
-        } else if (nom === "return") {
-          const email = e.saisie.trim();
-          if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-            e.erreur = t("Adresse email invalide.", "Invalid email address.");
-            return dessiner();
-          }
-          e.email = email;
-          occuper(t("Envoi du code…", "Sending the code…"));
-          demanderCodeEmail(email, L)
-            .then(() => {
-              occuper(null);
-              Object.assign(e, { ecran: "code", saisie: "", message: null });
-              dessiner();
-            })
-            .catch((err) => {
-              occuper(null);
-              e.erreur = err?.message ?? String(err);
-              dessiner();
-            });
-          return;
-        } else editer(touche);
-        return dessiner();
-      case "code":
-        if (nom === "escape") {
-          Object.assign(e, { ecran: "email", saisie: e.email, erreur: null });
-        } else if (touche.texte === "r" && !e.occupe) {
-          occuper(t("Envoi d'un nouveau code…", "Sending a new code…"));
-          demanderCodeEmail(e.email, L)
-            .then((r) => {
-              occuper(null);
-              e.message = r.dejaEnvoye ? t("Un code est parti il y a moins d'une minute : il reste valable (nouvel envoi dans {0} s).", "A code was sent less than a minute ago: it is still valid (new send in {0} s).", r.attente) : t("Un nouveau code vient de partir.", "A new code was just sent.");
-              dessiner();
-            })
-            .catch((err) => {
-              occuper(null);
-              e.erreur = err?.message ?? String(err);
-              dessiner();
-            });
-          return;
-        } else if (nom === "return" && !e.occupe) {
-          const code = e.saisie.replace(/\s+/g, "");
-          if (!/^\d{6,8}$/.test(code)) {
-            e.erreur = t("Le code ne contient que des chiffres (6 à 8).", "The code only has digits (6 to 8).");
-            return dessiner();
-          }
-          occuper(t("Vérification du code…", "Checking the code…"));
-          verifierCodeEmail(e.email, code, machine)
-            .then((r) => {
-              enregistrerConnexion({ ...r, machine });
-              return apresConnexion();
-            })
-            .catch((err) => {
-              occuper(null);
-              e.erreur = err?.message ?? String(err);
-              e.saisie = "";
-              dessiner();
-            });
-          return;
-        } else if (touche.texte) {
-          const chiffres = touche.texte.replace(/\D/g, "");
-          if (chiffres) e.saisie = (e.saisie + chiffres).slice(0, 8);
-        } else editer(touche);
-        return dessiner();
-      case "cle":
-        if (nom === "escape") {
-          Object.assign(e, { ecran: "connexion", saisie: "", erreur: null });
-        } else if (nom === "return" && !e.occupe) {
-          const brute = e.saisie;
-          occuper(t("Vérification de la clé…", "Checking the key…"));
-          verifierCleApi(brute)
-            .then((r) => {
-              enregistrerConnexion({ token: r.token, prefix: r.prefix, machine });
-              e.saisie = "";
-              return apresConnexion();
-            })
-            .catch((err) => {
-              occuper(null);
-              e.erreur = err?.message ?? String(err);
-              dessiner();
-            });
-          return;
-        } else editer(touche);
-        return dessiner();
-      case "projet-defaut": {
-        const n = e.projets.length + 1;
-        if (nom === "up") e.choix = (e.choix + n - 1) % n;
-        else if (nom === "down" || nom === "tab") e.choix = (e.choix + 1) % n;
-        else if (nom === "return") {
-          e.projetDefaut = e.choix === 0 ? null : e.projets[e.choix - 1].id;
-          enregistrerReglages({ projetDefaut: e.projetDefaut ?? undefined });
-          e.ecran = "notifications";
-          e.choix = e.notifications || !lireConfig().accueilFait ? 0 : 1;
-        }
-        return dessiner();
-      }
-      case "notifications":
-        if (nom === "up" || nom === "down" || nom === "tab") e.choix = e.choix === 0 ? 1 : 0;
-        else if (nom === "return") {
-          e.notifications = e.choix === 0;
-          enregistrerReglages({ notifications: e.notifications, accueilFait: true });
-          versPrincipal();
-          return flash(t("C'est prêt. ? affiche les raccourcis.", "All set. ? shows the shortcuts."));
-        }
-        return dessiner();
-      default:
-        break;
-    }
-
-    // L'écran principal. Un morceau collé (« /update --check ») se lit
-    // lettre par lettre : « / » ouvre la palette, la suite s'y écrit.
-    if (!e.palette && touche.texte && touche.texte.length > 1) {
-      for (const c of touche.texte) surTouche({ texte: c });
-      return;
-    }
-    if (e.aide) {
-      e.aide = false;
       return dessiner();
     }
-    if (e.palette) {
+    if (e.ecran === "navigateur") {
       if (nom === "escape") {
-        e.palette = false;
-      } else if (nom === "return") {
-        const choisi = e.menu[e.selMenu];
-        const saisie = e.saisie.trim();
-        // La saisie telle quelle si elle a des arguments ; sinon la commande choisie dans la liste.
-        const ligne = /\s/.test(saisie) || !choisi ? saisie : choisi.argument ? null : choisi.valeur;
-        if (ligne === null) {
-          e.saisie = `${choisi.valeur.replace(/^\//, "")} `;
-          e.menu = suggestionsConsole(e.saisie, { projets: e.projets, l: L });
-          e.selMenu = 0;
-          return dessiner();
-        }
-        e.palette = false;
-        e.iHisto = -1;
-        lancerLigne(ligne);
-      } else if (nom === "tab" && e.menu.length) {
-        e.saisie = `${e.menu[e.selMenu].valeur.replace(/^\//, "")} `;
-        e.menu = suggestionsConsole(e.saisie, { projets: e.projets, l: L });
-        e.selMenu = 0;
-      } else if (nom === "up" || nom === "down") {
-        if (e.menu.length) e.selMenu = (e.selMenu + (nom === "up" ? e.menu.length - 1 : 1)) % e.menu.length;
-        else if (e.histo.length) {
-          e.iHisto = nom === "up" ? (e.iHisto === -1 ? e.histo.length - 1 : Math.max(0, e.iHisto - 1)) : Math.min(e.histo.length, e.iHisto + 1);
-          e.saisie = e.iHisto >= 0 && e.iHisto < e.histo.length ? e.histo[e.iHisto].replace(/^\//, "") : "";
-        }
-      } else if (editer(touche)) {
-        e.menu = suggestionsConsole(e.saisie, { projets: e.projets, l: L });
-        e.selMenu = 0;
+        annulerConnexion();
+        e.ecran = "connexion";
+      } else if (touche.texte === "q") return quitter();
+      else if (nom === "return" && e.erreur) return void connexionNavigateur();
+      return dessiner();
+    }
+    // La clé d'API.
+    if (nom === "escape") Object.assign(e, { ecran: "connexion", saisie: "", erreur: null });
+    else if (nom === "return" && !e.occupe) {
+      const brute = e.saisie;
+      occuper(t("Vérification de la clé…", "Checking the key…"));
+      verifierCleApi(brute)
+        .then((r) => {
+          enregistrerConnexion({ token: r.token, prefix: r.prefix, machine });
+          e.saisie = "";
+          return apresConnexion();
+        })
+        .catch((err) => {
+          occuper(null);
+          e.erreur = err?.message ?? String(err);
+          dessiner();
+        });
+      return;
+    } else editer(touche);
+    return dessiner();
+  }
+
+  function toucheReglages(touche) {
+    const nom = touche.nom;
+    if (e.ecran === "projet-defaut") {
+      const liste = trierProjets(d.projets, d.ouverts);
+      const n = liste.length + 1;
+      if (nom === "up") e.choix = (e.choix + n - 1) % n;
+      else if (nom === "down" || nom === "tab") e.choix = (e.choix + 1) % n;
+      else if (nom === "return") {
+        e.projetDefaut = e.choix === 0 ? null : liste[e.choix - 1].id;
+        enregistrerReglages({ projetDefaut: e.projetDefaut ?? undefined });
+        e.ecran = "notifications";
+        e.choix = e.notifications || !lireConfig().accueilFait ? 0 : 1;
       }
       return dessiner();
     }
-    if (nom === "escape") {
-      if (e.action) return annulerAction();
-      e.flash = null;
+    if (nom === "up" || nom === "down" || nom === "tab") e.choix = e.choix === 0 ? 1 : 0;
+    else if (nom === "return") {
+      e.notifications = e.choix === 0;
+      enregistrerReglages({ notifications: e.notifications, accueilFait: true });
+      versPrincipal();
+      return flash(t("C'est prêt. ? affiche les raccourcis.", "All set. ? shows the shortcuts."));
+    }
+    return dessiner();
+  }
+
+  function touchePalette(touche) {
+    const nom = touche.nom;
+    if (nom === "escape") e.palette = false;
+    else if (nom === "return") {
+      const choisi = e.menu[e.selMenu];
+      const saisie = e.saisie.trim();
+      // La saisie telle quelle si elle a des arguments ; sinon la commande choisie dans la liste.
+      const ligne = /\s/.test(saisie) || !choisi ? saisie : choisi.argument ? null : choisi.valeur;
+      if (ligne === null) {
+        e.saisie = `${choisi.valeur.replace(/^\//, "")} `;
+        e.menu = suggestionsConsole(e.saisie, { projets: d.projets, l: L });
+        e.selMenu = 0;
+        return dessiner();
+      }
+      Object.assign(e, { palette: false, iHisto: -1 });
+      lancerLigne(ligne);
+    } else if (nom === "tab" && e.menu.length) {
+      e.saisie = `${e.menu[e.selMenu].valeur.replace(/^\//, "")} `;
+      e.menu = suggestionsConsole(e.saisie, { projets: d.projets, l: L });
+      e.selMenu = 0;
+    } else if (nom === "up" || nom === "down") {
+      if (e.menu.length) e.selMenu = (e.selMenu + (nom === "up" ? e.menu.length - 1 : 1)) % e.menu.length;
+      else if (e.histo.length) {
+        e.iHisto = nom === "up" ? (e.iHisto === -1 ? e.histo.length - 1 : Math.max(0, e.iHisto - 1)) : Math.min(e.histo.length, e.iHisto + 1);
+        e.saisie = e.iHisto >= 0 && e.iHisto < e.histo.length ? e.histo[e.iHisto].replace(/^\//, "") : "";
+      }
+    } else if (editer(touche)) {
+      e.menu = suggestionsConsole(e.saisie, { projets: d.projets, l: L });
+      e.selMenu = 0;
+    }
+    return dessiner();
+  }
+
+  function toucheFiltre(touche) {
+    if (touche.nom === "escape") Object.assign(e, { filtre: "", filtreEdition: false });
+    else if (touche.nom === "return" || touche.nom === "down" || touche.nom === "up") e.filtreEdition = false;
+    else {
+      const avant = e.saisie;
+      e.saisie = e.filtre;
+      editer(touche);
+      e.filtre = e.saisie.slice(0, 40);
+      e.saisie = avant;
+    }
+    recaler();
+    detailsBientot();
+    return dessiner();
+  }
+
+  /** Le panneau de droite a la main (Tab) : une ligne d'incident, d'URL ou de déploiement. */
+  function toucheDetail(touche) {
+    const p = projetChoisi();
+    const rangees = rangeesVue(e.vue, p, d);
+    const cle = touche.texte ?? touche.nom;
+    if (!p || !rangees.length || cle === "escape" || cle === "tab" || cle === "shift-tab") {
+      e.focus = "projets";
       return dessiner();
     }
-    const vue = VUES.findIndex((v) => v.id === e.vue);
+    e.ligne = Math.min(e.ligne, rangees.length - 1);
+    const r = rangees[e.ligne];
+    switch (cle) {
+      case "up":
+      case "k":
+        e.ligne = (e.ligne + rangees.length - 1) % rangees.length;
+        break;
+      case "down":
+      case "j":
+        e.ligne = (e.ligne + 1) % rangees.length;
+        break;
+      case "c":
+        if (r.url) return void executer("check", { _: ["check"], url: r.url }, t("check {0}", "check {0}", adresseCourte(r.url)));
+        return flash(t("Rien à vérifier sur cette ligne.", "Nothing to check on this line."));
+      case "o":
+      case "return":
+        ouvrir(r.url ?? adresseApp(p, "ships"));
+        break;
+      case "q":
+        return quitter();
+      default:
+        return;
+    }
+    dessiner();
+  }
+
+  function touchePrincipal(touche) {
+    const cle = touche.texte ?? touche.nom;
+    const vue = VUES_UI.findIndex((v) => v.id === e.vue);
     const bouger = (delta) => {
-      if (!e.projets.length) return;
-      e.sel = (e.sel + delta + e.projets.length) % e.projets.length;
-      void chargerDetails(projetChoisi());
+      const liste = affiches();
+      if (!liste.length) return;
+      const i = Math.max(0, liste.findIndex((p) => p.id === e.selId));
+      e.selId = liste[(i + delta + liste.length) % liste.length].id;
+      detailsBientot();
     };
-    switch (touche.texte ?? nom) {
+    switch (cle) {
+      case "escape":
+        if (e.action) return annulerAction();
+        if (e.filtre) Object.assign(e, { filtre: "" });
+        e.flash = null;
+        break;
       case "up":
       case "k":
         bouger(-1);
@@ -2705,57 +2636,76 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
         break;
       case "left":
       case "h":
-      case "shift-tab":
-        e.vue = VUES[(vue + VUES.length - 1) % VUES.length].id;
+        e.vue = VUES_UI[(vue + VUES_UI.length - 1) % VUES_UI.length].id;
         break;
       case "right":
       case "l":
+        e.vue = VUES_UI[(vue + 1) % VUES_UI.length].id;
+        break;
       case "tab":
-        e.vue = VUES[(vue + 1) % VUES.length].id;
+      case "shift-tab":
+        if (rangeesVue(e.vue, projetChoisi(), d).length) Object.assign(e, { focus: "detail", ligne: 0 });
+        else flash(t("Rien à choisir dans cette vue : ← → pour Incidents, Déploiements ou URLs.", "Nothing to pick in this view: ← → for Incidents, Deploys or URLs."), 3000);
         break;
       case "1":
       case "2":
       case "3":
       case "4":
       case "5":
-        e.vue = VUES[Number(touche.texte) - 1].id;
+        e.vue = VUES_UI[Number(cle) - 1].id;
         break;
       case "return":
         e.vue = "apercu";
         break;
       case "pageup":
-        e.defil = Math.min(Math.max(0, e.sortie.length - 3), e.defil + Math.max(1, H() - 10));
+        e.defil = Math.min(Math.max(0, e.sortie.length - 3), e.defil + Math.max(1, ecran.taille().h - 10));
         break;
       case "pagedown":
-        e.defil = Math.max(0, e.defil - Math.max(1, H() - 10));
+        e.defil = Math.max(0, e.defil - Math.max(1, ecran.taille().h - 10));
         break;
-      case "c":
-        if (projetChoisi()) void executer("check", { _: ["check"], project: projetChoisi().id }, t("check {0}", "check {0}", adresseCourte(projetChoisi().url)));
+      case "c": {
+        const p = projetChoisi();
+        if (p) void executer("check", { _: ["check"], project: p.id }, t("check {0}", "check {0}", adresseCourte(p.url)));
         break;
-      case "w":
-        if (projetChoisi()) void executer("wait", { _: ["wait"], project: projetChoisi().id }, t("wait — le prochain ship de {0}", "wait — the next ship of {0}", projetChoisi().name));
+      }
+      case "w": {
+        const p = projetChoisi();
+        if (p) void executer("wait", { _: ["wait"], project: p.id }, t("wait — le prochain ship de {0}", "wait — the next ship of {0}", p.name));
         break;
-      case "o":
-        ouvrirProjet();
+      }
+      case "o": {
+        const p = projetChoisi();
+        if (p) ouvrir(adresseApp(p));
+        break;
+      }
+      case "s": {
+        const page = projetChoisi() && d.details.get(projetChoisi().id)?.statusPage;
+        if (page) ouvrir(`${baseUrl()}/s/${encodeURIComponent(page)}`);
+        else flash(t("Pas de page de statut publique pour ce projet.", "No public status page for this project."), 3000);
+        break;
+      }
+      case "f":
+        Object.assign(e, { filtreEdition: true, focus: "projets" });
         break;
       case "r":
         flash(t("Relecture…", "Refreshing…"), 1500);
-        void rafraichir(true);
-        void chargerDetails(projetChoisi(), true);
+        void relever(true);
+        detailsBientot(true);
         break;
-      case "d":
-        if (projetChoisi()) {
-          e.projetDefaut = projetChoisi().id;
-          enregistrerReglages({ projetDefaut: e.projetDefaut });
-          flash(t("{0} s'ouvrira en premier.", "{0} will open first.", projetChoisi().name));
+      case "d": {
+        const p = projetChoisi();
+        if (p) {
+          e.projetDefaut = p.id;
+          enregistrerReglages({ projetDefaut: p.id });
+          flash(t("{0} s'ouvrira en premier.", "{0} will open first.", p.name));
         }
         break;
+      }
       case "n":
-        lancerLigne("notifier");
-        break;
+        return lancerLigne("notifier");
       case "/":
         Object.assign(e, { palette: true, saisie: "", selMenu: 0, iHisto: -1 });
-        e.menu = suggestionsConsole("", { projets: e.projets, l: L });
+        e.menu = suggestionsConsole("", { projets: d.projets, l: L });
         break;
       case "?":
         e.aide = true;
@@ -2768,29 +2718,52 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
     dessiner();
   }
 
+  function surTouche(touche) {
+    // Ctrl+C : annule ce qui tourne, sinon quitte.
+    if (touche.ctrl && touche.nom === "c") return e.action ? annulerAction() : quitter();
+    if (e.ecran === "connexion" || e.ecran === "navigateur" || e.ecran === "cle") return toucheConnexion(touche);
+    if (e.ecran === "projet-defaut" || e.ecran === "notifications") return toucheReglages(touche);
+    if (e.ecran !== "principal") return;
+    // Un morceau collé (« /update --check ») se lit lettre par lettre :
+    // « / » ouvre la palette, la suite s'y écrit.
+    if (!e.palette && !e.filtreEdition && touche.texte && touche.texte.length > 1) {
+      for (const c of touche.texte) surTouche({ texte: c });
+      return;
+    }
+    if (e.aide) {
+      e.aide = false;
+      return dessiner();
+    }
+    if (e.palette) return touchePalette(touche);
+    if (e.filtreEdition) return toucheFiltre(touche);
+    if (e.focus === "detail") return toucheDetail(touche);
+    return touchePrincipal(touche);
+  }
+
   // --- l'entrée et la sortie ---------------------------------------------
 
   return new Promise((resoudre) => {
     let minuterie = null;
-    const surDonnees = (d) => {
-      if (String(d).includes("]11;")) return;
-      for (const touche of lireTouches(d)) {
+    const surDonnees = (morceau) => {
+      // Une réponse tardive à la question du fond (OSC 11) n'est pas une frappe.
+      if (String(morceau).includes("]11;")) return;
+      for (const touche of lireTouches(morceau)) {
         if (e.fin) return;
         surTouche(touche);
       }
     };
     const surRedimension = () => {
-      e.precedent = [];
-      ecrireEcran("\x1b[2J");
+      ecran.invalider();
       dessiner();
     };
-    const restaurer = () => ecrireEcran("\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?1049l");
+    const restaurer = () => ecran.sortir();
 
-    function quitterInterne(suite = null) {
+    quitter = (suite = null) => {
       if (e.fin) return;
       e.fin = true;
       clearInterval(minuterie);
       clearInterval(animation);
+      clearTimeout(delaiDetails);
       annulerConnexion();
       annulerAction();
       entree.off("data", surDonnees);
@@ -2806,17 +2779,16 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
       if (origines.roue === undefined) delete process.env.POSTSHIP_NO_SPINNER;
       else process.env.POSTSHIP_NO_SPINNER = origines.roue;
       resoudre(suite);
-    }
-    quitter = quitterInterne;
+    };
 
     (async () => {
       entree.setRawMode?.(true);
       entree.resume();
       const impose = process.env.POSTSHIP_THEME || config.theme;
       if (impose === "clair" || impose === "sombre") definirTheme(impose);
-      else definirTheme((detecter ? await detecterTheme(entree, ecrireEcran) : null) ?? "neutre");
+      else definirTheme((detecter ? await detecterTheme(entree, ecran.ecrire) : null) ?? "neutre");
       process.on("exit", restaurer);
-      ecrireEcran("\x1b[?1049h\x1b[?25l\x1b[2J");
+      ecran.entrer();
       entree.on("data", surDonnees);
       sortie.on?.("resize", surRedimension);
       if (!VERSION.startsWith("__")) {
@@ -2833,22 +2805,18 @@ function lancerInterface(commandes, { entree = process.stdin, sortie = process.s
         e.ecran = "connexion";
         dessiner();
       } else {
-        e.ecran = "chargement";
         occuper(t("Lecture de vos projets…", "Reading your projects…"));
-        await rafraichir(false);
+        await relever(false);
         occuper(null);
         if (e.ecran !== "connexion") {
-          if (!config.accueilFait) {
-            e.ecran = e.projets.length ? "projet-defaut" : "notifications";
-            e.choix = e.ecran === "notifications" ? 0 : Math.max(0, e.projets.findIndex((p) => p.id === e.projetDefaut) + 1);
-          } else versPrincipal();
+          if (!config.accueilFait) versReglages();
+          else versPrincipal();
         }
-        dessiner();
       }
-      minuterie = setInterval(() => void rafraichir(true), intervalle);
+      minuterie = setInterval(() => void relever(true), intervalle);
       minuterie.unref?.();
     })().catch((err) => {
-      quitterInterne(null);
+      quitter(null);
       origines.error(masquer(err?.message ?? String(err)));
     });
   });
