@@ -22,7 +22,7 @@ inputs:
     description: L'adresse à vérifier (https, publique).
     required: true
   token:
-    description: Jeton d'API PostShip (Compte → API). À passer via un secret.
+    description: Jeton d'API PostShip (Réglages de l'espace → API). À passer via un secret.
     required: true
   min-score:
     description: Échoue si le Ship Score est sous ce seuil. 0 = pas de seuil.

@@ -15,7 +15,7 @@ import { spawn, execFileSync, spawnSync } from "node:child_process";
 // Chaque commande : ce qu'elle fait, ses options expliquées une à une,
 // deux exemples au moins, ce que le code de sortie veut dire, et ce
 // qu'on vérifie quand ça ne marche pas.
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 
 /** @typedef {{ fr: string, en: string }} T */
 
@@ -35,11 +35,11 @@ const COMMANDES = {
     quota: false,
     usage: "postship login [--machine <nom>] [--no-browser]",
     description: {
-      fr: "Affiche un code de huit caractères et ouvre postship.fr/cli/autoriser. Vous vous connectez (ou vous l'êtes déjà), vous comparez le code à celui du terminal, vous autorisez. La CLI reçoit une clé d'API à votre nom — « CLI · <machine> », visible et révocable dans Compte → API, qui expire après 90 jours sans usage — et l'écrit dans ~/.config/postship/config.json (mode 0600). Dix minutes pour tout faire ; le code ne sert qu'une fois. Dans l'interface (postship tapé seul), deux façons de se connecter : le navigateur, ou une clé d'API collée.",
-      en: "Shows an eight-character code and opens postship.fr/cli/autoriser. You sign in (or already are), compare the code with the terminal's, and authorize. The CLI receives an API key in your name — “CLI · <machine>”, visible and revocable in Account → API, expiring after 90 days without use — and writes it to ~/.config/postship/config.json (mode 0600). Ten minutes to do it all; the code is single-use. In the interface (postship typed alone), two ways to sign in: the browser, or a pasted API key.",
+      fr: "Affiche un code de huit caractères et ouvre postship.fr/cli/autoriser. Vous vous connectez (ou vous l'êtes déjà), vous comparez le code à celui du terminal, vous autorisez. La CLI reçoit une clé d'API à votre nom — « CLI · <machine> », visible et révocable dans Réglages de l'espace → API, qui expire après 90 jours sans usage — et l'écrit dans ~/.config/postship/config.json (mode 0600). Dix minutes pour tout faire ; le code ne sert qu'une fois. Dans l'interface (postship tapé seul), deux façons de se connecter : le navigateur, ou une clé d'API collée.",
+      en: "Shows an eight-character code and opens postship.fr/cli/autoriser. You sign in (or already are), compare the code with the terminal's, and authorize. The CLI receives an API key in your name — “CLI · <machine>”, visible and revocable in Workspace settings → API, expiring after 90 days without use — and writes it to ~/.config/postship/config.json (mode 0600). Ten minutes to do it all; the code is single-use. In the interface (postship typed alone), two ways to sign in: the browser, or a pasted API key.",
     },
     options: [
-      { nom: "--machine", valeur: "<nom>", texte: { fr: "Le nom de cet appareil dans Compte → API (par défaut : le nom de la machine).", en: "This device's name in Account → API (default: the machine's hostname)." } },
+      { nom: "--machine", valeur: "<nom>", texte: { fr: "Le nom de cet appareil dans Réglages de l'espace → API (par défaut : le nom de la machine).", en: "This device's name in Workspace settings → API (default: the machine's hostname)." } },
       { nom: "--no-browser", texte: { fr: "N'ouvre pas le navigateur : affiche seulement l'adresse et le code, pour une machine distante.", en: "Do not open the browser: only print the address and the code, for a remote machine." } },
     ],
     exemples: [
@@ -56,7 +56,7 @@ const COMMANDES = {
     resume: { fr: "Révoque la clé de cet appareil et efface la configuration.", en: "Revoke this device's key and clear the configuration." },
     quota: false,
     usage: "postship logout",
-    description: { fr: "La clé qui parle est révoquée côté PostShip (elle disparaît de Compte → API), puis retirée de ~/.config/postship/config.json. Une clé posée dans POSTSHIP_TOKEN n'est pas touchée : ce n'est pas la CLI qui l'a mise là.", en: "The speaking key is revoked on PostShip's side (it disappears from Account → API), then removed from ~/.config/postship/config.json. A key set in POSTSHIP_TOKEN is left alone: the CLI did not put it there." },
+    description: { fr: "La clé qui parle est révoquée côté PostShip (elle disparaît de Réglages de l'espace → API), puis retirée de ~/.config/postship/config.json. Une clé posée dans POSTSHIP_TOKEN n'est pas touchée : ce n'est pas la CLI qui l'a mise là.", en: "The speaking key is revoked on PostShip's side (it disappears from Workspace settings → API), then removed from ~/.config/postship/config.json. A key set in POSTSHIP_TOKEN is left alone: the CLI did not put it there." },
     options: [],
     exemples: [{ cmd: "postship logout", texte: { fr: "Avant de rendre un poste prêté.", en: "Before returning a borrowed computer." } }],
     sortie: { fr: "0 déconnecté · 2 aucune clé, ou PostShip injoignable (la config locale est effacée quand même).", en: "0 signed out · 2 no key, or PostShip unreachable (the local config is cleared anyway)." },
@@ -1269,7 +1269,7 @@ async function login(args, { dormir = (ms) => new Promise((r) => setTimeout(r, m
 async function logout() {
   const config = lireConfig();
   if (!config.token) {
-    if (process.env.POSTSHIP_TOKEN) throw new ErreurCli(t("La clé vient de POSTSHIP_TOKEN, pas de la CLI : retirez la variable, ou révoquez la clé dans Compte → API.", "The key comes from POSTSHIP_TOKEN, not from the CLI: unset the variable, or revoke the key in Account → API."), 2);
+    if (process.env.POSTSHIP_TOKEN) throw new ErreurCli(t("La clé vient de POSTSHIP_TOKEN, pas de la CLI : retirez la variable, ou révoquez la clé dans Réglages de l'espace → API.", "The key comes from POSTSHIP_TOKEN, not from the CLI: unset the variable, or revoke the key in Workspace settings → API."), 2);
     throw new ErreurCli(t("Aucune clé enregistrée par la CLI.", "No key saved by the CLI."), 2);
   }
   let revoquee = true;
@@ -1286,7 +1286,7 @@ async function logout() {
   void _m;
   void _c;
   ecrireConfig(reste);
-  if (!revoquee) throw new ErreurCli(t("Config locale effacée, mais PostShip est injoignable : révoquez la clé dans Compte → API.", "Local config cleared, but PostShip is unreachable: revoke the key in Account → API."), 2);
+  if (!revoquee) throw new ErreurCli(t("Config locale effacée, mais PostShip est injoignable : révoquez la clé dans Réglages de l'espace → API.", "Local config cleared, but PostShip is unreachable: revoke the key in Workspace settings → API."), 2);
   ecrire(`${symbole("pass")} ${t("Déconnecté : la clé est révoquée et retirée de {0}.", "Signed out: the key is revoked and removed from {0}.", cheminConfig())}`);
   return 0;
 }
@@ -1303,7 +1303,7 @@ function origineJeton() {
 // plein écran et `postship login` les affichent chacune à leur manière.
 //   - le navigateur : le flux d'appareil (un code court, une page qui
 //     autorise, la clé qui arrive) ;
-//   - une clé d'API : une clé psk_… déjà créée dans Compte → API, vérifiée
+//   - une clé d'API : une clé psk_… déjà créée dans Réglages de l'espace → API, vérifiée
 //     avant d'être enregistrée.
 // Le QR code et l'email + code (28 sept. 2026) ont été retirés le jour
 // même, à la demande : deux chemins de plus à défendre pour un geste rare.
@@ -1336,7 +1336,7 @@ async function attendreAppareil(demande, { dormir = (ms) => new Promise((r) => s
 /** Vérifie une clé collée : la forme, puis PostShip ; rend { token, prefix, plan }. */
 async function verifierCleApi(brute) {
   const cle = String(brute).trim();
-  if (!/^psk_[A-Za-z0-9_-]{16,}$/.test(cle)) throw new ErreurCli(t("Ce n'est pas une clé PostShip : elle commence par psk_ (Compte → API).", "This is not a PostShip key: it starts with psk_ (Account → API)."), 2);
+  if (!/^psk_[A-Za-z0-9_-]{16,}$/.test(cle)) throw new ErreurCli(t("Ce n'est pas une clé PostShip : elle commence par psk_ (Réglages de l'espace → API).", "This is not a PostShip key: it starts with psk_ (Workspace settings → API)."), 2);
   const r = await appel("GET", "/api/v1/me", { jeton: cle, timeoutMs: 15_000 });
   if (r.status === 401) throw new ErreurCli(t("Clé refusée : révoquée, expirée ou mal copiée.", "Key refused: revoked, expired or miscopied."), 2);
   if (!r.ok) throw new ErreurCli(r.payload?.error ?? t("PostShip a répondu {0}.", "PostShip answered {0}.", r.status), 2);
@@ -1779,7 +1779,7 @@ function creerVues({ L, U }) {
 
   function ecranCle(e, w, h) {
     const pied = `${touche(t("Entrée", "Enter"), t("valider", "confirm"))}   ${touche(t("Échap", "Esc"), t("revenir", "back"))}`;
-    return centre([t("Collez votre clé d'API", "Paste your API key"), "", ...champ(e.saisie, true), "", ...para(t("Elle commence par psk_ ; créez-la dans Compte → API sur postship.fr. Elle ne s'affiche pas ici.", "It starts with psk_; create it in Account → API on postship.fr. It is not shown here."), w, "dim"), "", ...etat(e, w)], pied, w, h);
+    return centre([t("Collez votre clé d'API", "Paste your API key"), "", ...champ(e.saisie, true), "", ...para(t("Elle commence par psk_ ; créez-la dans Réglages de l'espace → API sur postship.fr. Elle ne s'affiche pas ici.", "It starts with psk_; create it in Workspace settings → API on postship.fr. It is not shown here."), w, "dim"), "", ...etat(e, w)], pied, w, h);
   }
 
   function ecranProjetDefaut(e, d, w, h) {
@@ -3550,7 +3550,7 @@ async function open(args) {
   if (courant) {
     // L'adresse lisible du projet (/<espace>/<projet>) est celle de l'app :
     // /<uuid> redirige vers elle, ce qui suffit ici.
-    const suffixe = { apercu: "", incidents: "/incidents", deploys: "/deploys", urls: "/urls", performance: "/observability/performance", reglages: "/settings" }[page];
+    const suffixe = { apercu: "", incidents: "/incidents", deploys: "/deploys", urls: "/urls", performance: "/monitoring/performance", reglages: "/settings/general" }[page];
     url = `${baseUrl()}/${encodeURIComponent(courant)}${suffixe}`;
   }
   ecrire(url);
@@ -3795,7 +3795,7 @@ async function uninstall(args, options = {}) {
     if (code !== 0) throw new ErreurCli(t("La désinstallation a échoué (code {0}) : {1} {2}", "Uninstalling failed (code {0}): {1} {2}", code, inst.nom, inst.retirer.join(" ")), 2);
     ecrire(`${symbole("pass")} ${t("postship est désinstallé. Merci de l'avoir essayé.", "postship is uninstalled. Thanks for trying it.")}`);
   }
-  if (process.env.POSTSHIP_TOKEN) ecrire(peindre("yellow", t("POSTSHIP_TOKEN reste posé dans votre environnement : retirez-le, ou révoquez la clé dans Compte → API.", "POSTSHIP_TOKEN is still set in your environment: unset it, or revoke the key in Account → API.")));
+  if (process.env.POSTSHIP_TOKEN) ecrire(peindre("yellow", t("POSTSHIP_TOKEN reste posé dans votre environnement : retirez-le, ou révoquez la clé dans Réglages de l'espace → API.", "POSTSHIP_TOKEN is still set in your environment: unset it, or revoke the key in Workspace settings → API.")));
   surFin?.("uninstall");
   return 0;
 }
